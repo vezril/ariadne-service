@@ -15,7 +15,7 @@ ThisBuild / scalaVersion := "3.3.4" // Scala 3 LTS
 
 ThisBuild / homepage := Some(url("https://github.com/vezril/ariadne-service"))
 ThisBuild / licenses := Seq(
-  "MIT" -> url("https://github.com/vezril/ariadne-service/blob/main/LICENSE")
+  "MIT" -> url("https://github.com/vezril/ariadne-service/blob/main/LICENSE.md")
 )
 ThisBuild / startYear := Some(2026)
 ThisBuild / developers := List(
