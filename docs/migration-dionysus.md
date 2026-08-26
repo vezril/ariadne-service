@@ -47,8 +47,9 @@ final case class Ingredient(
 `Option` is load-bearing: an ingredient may legitimately have no market product (water, "salt to
 taste") or not be linked *yet*. Nothing in meal planning/logging should ever require it — only
 shopping-list pricing wants it, and it degrades gracefully (unpriced line) when absent. One
-ingredient → one product in v1; if you later want per-store or size-variant preferences, that's a
-mapping table on your side, not an Ariadne change.
+ingredient → one product in v1; note an Ariadne ProductId implies **one pack size** (DESIGN
+§6.7 — sizes are distinct products), so if you later want per-store or size-variant preferences,
+that's a mapping table on your side (compared on unit price), not an Ariadne change.
 
 ## Your new integration contract
 

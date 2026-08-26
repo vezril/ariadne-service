@@ -1,6 +1,7 @@
 # Ariadne — service technical design
 
-**Status:** DESIGN (2026-08-26). No code exists yet; this doc is the implementation design for
+**Status:** DESIGN (2026-08-26, rev 2 — integrates the Demeter session's review and Calvin's
+alert-dedup decision). No code exists yet; this doc is the implementation design for
 `ariadne-service`. The **domain source of truth is `~/Code/codex/docs/product-catalog.md`** (the
 EventStorming-validated Product Catalog design — aggregates, events, policies, the two hot spots).
 This doc does not restate that design; it builds on it and cross-references it. Where the two ever
@@ -105,7 +106,8 @@ enum ProductEvent:
                          origin: Origin, status: ProductStatus)   // → Hermes product.registered
   case ProductIdentifierAdded(gtin: Gtin)
   case ProductAliasAdded(alias: String)
-  case ListingLinked(key: ListingKey, confidence: Confidence, how: MatchMethod)
+  case ListingLinked(key: ListingKey, confidence: Confidence, how: MatchMethod,
+                     matcher: MatcherVersion)                     // §6.6 — every link is versioned
   case ProductMerged(into: ProductId)                             // tombstone written on the LOSER
   case ProductAbsorbed(loser: ProductId, gtins: Set[Gtin],
                        aliases: Set[String], listings: Set[ListingKey]) // written on the WINNER
@@ -154,11 +156,14 @@ enum PriceCommand:
   case ObservePrice(price: Money, observedAt: Instant, source: PriceSource,
                     unitPrice: Option[UnitPrice],  // normalized $/100g, $/L … computed upstream
                     promo: Option[PromoFlag],      // was-this-a-sale FACT (not a judgment)
+                    priceConfidence: Confidence,   // fact-extraction certainty (price-text/multi-buy/% parsing)
+                    sizeConfidence: Confidence,    // size-parse certainty — CONTRACT-REQUIRED, see below
                     correlationId: CorrelationId)
 
 enum PriceEvent:
   case PriceObserved(productId: ProductId, storeId: StoreId, price: Money,
                      unitPrice: Option[UnitPrice], promo: Option[PromoFlag],
+                     priceConfidence: Confidence, sizeConfidence: Confidence,
                      observedAt: Instant, source: PriceSource)   // → Hermes product.price.observed
 
 enum PriceSource:
@@ -167,6 +172,16 @@ enum PriceSource:
   case Manual                      // Calvin typed it
   case Backfill(origin: String)    // migration replay (carries ORIGINAL observedAt)
 ```
+
+**The two confidences are facts and part of the contract, not decoration** (Demeter review,
+2026-08-26). Demeter's pipeline established — and its corpus carries — both a `price_confidence`
+(how certain the fact extraction was: price-text, multi-buy, percent-off parsing) and a size
+signal with a **contract coupling**: in Demeter today,
+`matchConfidence = split.confidence.min(sizeConfidence)` — *an ambiguous size lowers match
+confidence.* Size parsing moves to Ariadne while match-quality judgment stays downstream, so if
+`PriceObserved` did not carry `sizeConfidence`, Demeter's confidence would silently read too high.
+Both fields ride the event, the Hermes message, and the gRPC `PricePoint` (§4/§5), and are
+preserved verbatim on backfill (`Manual`/`Purchase` sources emit 1.0).
 
 `decide` = validate (positive money, known currency, sane timestamp, dedup: identical
 price+source within the same calendar day is a no-op). **There is no update/delete** — a wrong
@@ -177,7 +192,9 @@ Demeter's judgment — the line stays.
 The **scraping policy lives here** (moved in from Demeter): a scheduled Pekko-actor per source
 (`whenever schedule due then ObservePrice`) runs the Flipp/retailer sources, pushes raw listings
 through the resolver (§6), and appends observations. Scraper sources are pluggable
-(`PriceSourceAdapter`), config-driven, with per-source schedules in the chart.
+(`PriceSourceAdapter`), config-driven, with per-source schedules in the chart. Full ingestion
+pipeline design — the ported Demeter components, the Flipp quirks, and the **raw-archive/replay
+requirement** — is §2.6.
 
 ### 2.4 Purchase — immutable fact
 
@@ -231,6 +248,76 @@ enum ResolutionEvent:   case ResolutionProposed(...); case ResolutionConfirmed(.
 Confirm/merge decisions fan out as commands to the Product aggregates (process manager over the
 ResolutionCase journal). This keeps human-review state OUT of Product — Product stays facts.
 
+### 2.6 Ingestion — the scraper pipeline (Flipp v1), quirks, and replay
+
+Grounded in the Demeter session's review (2026-08-26) of what actually moves. The pipeline, per
+scrape run:
+
+```
+fetch raw response ──► ARCHIVE RAW BYTES (Apollo blob)  ◄── happens BEFORE anything trusts the parse
+      │
+      ▼
+decode (ported FlippDecoders) ──► re-stamp merchantId from the FLYER (quirk #1)
+      │
+      ▼
+normalize (SHARED text lib — see below) ──► fact extraction (ported calculators)
+      │
+      ▼
+resolver (§6) ──► ObservePrice(priceConfidence, sizeConfidence, …)
+```
+
+**What ports from Demeter — the fact/judgment line, file by file** (agreed with the Demeter
+session):
+
+| Demeter component | Disposition |
+|---|---|
+| `UnitPriceCalculator`, `PriceTextParser`, `MultiBuyParser`, `PercentOffParser` | **Move to Ariadne** — they compute *facts*. (The percent-off *number* is a fact; the is-it-a-deal *verdict* on it stays Demeter.) |
+| `ObservationAssembler` | **The fact/judgment boundary itself** — its successor is Ariadne's `PriceObserved` producer (the last pipeline stage above) |
+| `TextNormalizer`, `BilingualSplitter` | **SHARED LIBRARY — not a move.** Used by BOTH the matcher and fact extraction; `minFuzzyLength=7` is tuned against a real production false positive. **Never fork** (two drifting copies = bug generator). Design: extract into a small published Scala artifact (proposal: `catalog-text-core`, published via GitHub Packages like the Lexicon stubs, versioned, consumed by both Ariadne and Demeter). *Home + ownership is an open coordination point — §10.* |
+| `FlippSource` / `FlyerSource` / `FlippDecoders`, the fetch ledger, rate limiting | **Move to Ariadne** (port, don't rewrite) |
+| `PriceStats`, `DealVerdict`, watchlist/alerting/insight/CPI | **Stay in Demeter** (judgments), now fed by Ariadne |
+
+**Flipp source quirks — load-bearing, carried verbatim** (descending pain, from the Demeter
+session; ignore any of these and the corpus corrupts *quietly*):
+
+1. **Per-flyer item responses carry NO merchant** — merchant belongs to the FLYER. Re-stamp every
+   item with `flyer.merchantId` before assembly (Demeter's `DailyRun.scala:136`). Missed → all
+   products land on merchant 0 and collide into one key: a corrupt corpus that *looks fine* (row
+   counts right, identity wrong). The dual-run comparison in `migration-demeter.md` checks
+   product-key cardinality specifically to catch this class of bug.
+2. **Flyer selection is LEDGER-BASED**: fetch only flyer/window pairs not already in the fetch
+   ledger (`flyer_fetch_ledger` — e.g. 18 of 164 on a typical day). Fetching all flyers daily is
+   ~9x load on a bot-walled upstream. The ledger ports with the scraper.
+3. **Bot wall**: HTTP 403 → non-retriable `BotWall` error + body-signature detection —
+   operator-attention, never retry. Rate limit **4 requests/window/source**, full-jitter backoff
+   1s→30s cap, 3 attempts. **Carry the rate limit.**
+4. **Flipp item ids change weekly — never key on them.** (This is the entire reason product keys
+   exist; Ariadne's `ListingKey` must use the retailer's *stable* listing identity where one
+   exists, and fall back to re-resolution where Flipp gives none.)
+5. **One postal code decides which stores' flyers exist** — config, no useful default.
+6. **No auth** — an unauthenticated public endpoint; the politeness policy (#2 + #3) is
+   load-bearing, not optional tuning.
+
+**Raw-response archive + replay — a FIRST-CLASS requirement, not an optimization.** Demeter
+archives raw response bytes *before* anything trusts the parse, and can re-derive the full
+observation set from the archive (decoders + assembler). Two of its parser bugs were only
+retroactively fixable because of this. Moving ingestion+normalization+storage here means Demeter
+*loses* replay — so **Ariadne must own it**:
+
+- Every raw source response is archived (Apollo blob; keyed by source/run/response id) **before**
+  parsing; the `PriceSource.Scrape` provenance joins back to the archived response.
+- The full observation set is **re-derivable from the archive**: a `replay` mode re-runs
+  decode→normalize→extract over archived bytes and reconciles against the journal (emitting
+  retractions + corrected observations where a decoder bug is fixed).
+- Why non-negotiable: **flyers expire — there is no re-fetch.** Without the archive, a bad decoder
+  deploy silently and *permanently* poisons the corpus.
+
+**Backfill sources** (see `migration-demeter.md` for sequencing): `Backfill("demeter")` — the
+first-party Flipp corpus exported from Demeter (both confidences preserved, provenance via the
+`raw_response_id` join); `Backfill("hammer")` — the **Hammer grocery dataset loaded directly from
+Jacob Filipp's public dataset**, NOT via Demeter (Demeter never loaded it into prod; re-exporting
+would be a lossy detour through a corpus it isn't in).
+
 ---
 
 ## 3. Projections (read models)
@@ -242,10 +329,10 @@ schema-evolution story for read models). Offsets in the standard projection offs
 | Projection | Source streams | Tables (sketch) | Serves |
 |---|---|---|---|
 | **product-catalog** | Product, Store | `products(id, name, brand, category, size, status, merged_into)` · `product_gtins(gtin→product_id)` · `product_aliases` · `product_listings(store_id, external_id → product_id)` · `stores` | GetProduct / ListProducts / SearchProducts; redirect-following for merged ids |
-| **price-history** | PriceObservation | `price_history(product_id, store_id, observed_at, price, unit_price, promo, source, correlation_id)` — the shared read model from the EventStorming wall | GetPriceHistory (product × store × time) |
+| **price-history** | PriceObservation | `price_history(product_id, store_id, observed_at, price, unit_price, promo, price_confidence, size_confidence, source, correlation_id)` — the shared read model from the EventStorming wall | GetPriceHistory (product × store × time) — incl. **demeter-insight**'s history endpoint + price chart (§4) |
 | **current-price** | PriceObservation | `current_price(product_id, store_id, price, unit_price, observed_at, source)` — one row per pair, last-write-wins by `observedAt` | GetCurrentPrice (the shopping-list NOW call) |
 | **purchase-history** | Purchase | `purchases`, `purchase_lines` | ListPurchases; future budgeting queries |
-| **resolver/match index** | Product | `match_index(product_id, normalized_name, name_tokens, trigrams tsvector/pg_trgm, brand_norm, size_class)` + the gtin + listing tables above | ResolveProduct scoring (§6.4); the GTIN-uniqueness guard |
+| **resolver/match index** | Product | `match_index(product_id, normalized_name, name_tokens, trigrams tsvector/pg_trgm, brand_norm, size_class)` + the gtin + listing tables above; rows record the normalizer/matcher version they were built with (§6.6) | ResolveProduct scoring (§6.4); the GTIN-uniqueness guard |
 | **review-queue** | ResolutionCase | `resolution_cases(id, state, subject, candidates_json, created_at)` | ariadne-ui review screens |
 | **hermes-publisher** | Product, PriceObservation, Purchase | (offset only) | §5 — the outbox projection |
 | **price-append process manager** | Purchase | (offset only) | issues `ObservePrice(source=Purchase)` per line (§2.4) |
@@ -289,7 +376,11 @@ entity `decide`.
 
 **Consumers of gRPC:** Dionysus (GetProduct, ResolveProduct, GetCurrentPrice — shopping list &
 ingredient linking), Demeter (GetProduct, GetPriceHistory — on-demand history for scoring
-context), ariadne-ui's BFF, future Plutus (ListPurchases).
+context), **demeter-insight** (GetPriceHistory — today it reads Demeter's `price_observation`
+table directly by SQL for its product-history endpoint and the UI price chart; when that storage
+moves here, insight re-points to this RPC — a required migration consumer, see
+`migration-demeter.md`), ariadne-ui's BFF, future Plutus (ListPurchases). `PricePoint` carries
+`price_confidence` + `size_confidence` (§2.3).
 
 ### REST + `/docs`
 
@@ -311,7 +402,7 @@ Prometheus `/metrics` with Hera scrape annotations round out the HTTP server.
 | Topic | Domain event | Payload (Lexicon schema, PROPOSAL) | Subscribers |
 |---|---|---|---|
 | `product.registered` | `ProductRegistered` (and `ProductMerged` tombstones — see below) | product id, name, brand, size, gtin?, status, origin, `correlationId` | **Demeter** (optional: refresh watchable-product cache) · **Dionysus** (optional: new-product awareness for ingredient linking); both may ignore it in v1 |
-| `product.price.observed` | `PriceObserved` | product id, store id, price, unit price, promo?, observed_at, source, `correlationId` | **Demeter** (REQUIRED — the deal-evaluation policy: *whenever PriceObserved on a watched product then evaluate*) |
+| `product.price.observed` | `PriceObserved` | product id, store id, price, unit price, promo?, **price_confidence, size_confidence** (§2.3 — size ambiguity must reach Demeter's match confidence), observed_at, source, `correlationId` | **Demeter** (REQUIRED — the deal-evaluation policy: *whenever PriceObserved on a watched product then evaluate*) |
 | `purchase.recorded` | `PurchaseRecorded` | purchase id, store id, purchased_at, lines[], total, source, `correlationId` | none in v1 · **future budgeting (Plutus)** · Dionysus MAY subscribe later for pantry restock |
 
 Topic names live in Ariadne's chart/config (env-overridable, the Artemis idiom); the service
@@ -344,6 +435,7 @@ pinned `hermesmq-client` (@v1.13.0), and only then advances its offset.
 ### Consumer map (the whole picture)
 
 - **Demeter** ← `product.price.observed` (Hermes, required) · GetPriceHistory/GetProduct (gRPC, on demand).
+- **demeter-insight** ← GetPriceHistory (gRPC — replaces its direct SQL read of Demeter's table).
 - **Dionysus** → mostly **pulls gRPC** (GetProduct, ResolveProduct, GetCurrentPrice); MAY subscribe `product.registered`.
 - **Plutus (future)** ← `purchase.recorded` + ListPurchases.
 - **ariadne-ui** → REST only.
@@ -359,6 +451,15 @@ The thread through the labyrinth. Two entry paths, one engine:
 - **Path B — Dionysus ingredient → Product** (interactive): `ResolveProduct` over gRPC; Dionysus
   stores the returned id on its Ingredient. Same engine, sync caller.
 
+**This is greenfield, not an absorption** (corrected by the Demeter session, 2026-08-26).
+Demeter's `ProductKey` is `sha256(merchantId | normalized-name-tokens | size)` —
+**merchant-scoped by construction**; its scaladoc is explicit that cross-language and
+cross-merchant identity are *not that key's job*. Nobody in the constellation has ever built
+cross-merchant identity: the ground here is empty, and hot spot #1 is a **new capability**, not a
+port. Budget it accordingly. What we DO inherit is Demeter's discipline: their key carries a
+`Version` field (`"v1"`) precisely so an algorithm change migrates history *deliberately* instead
+of silently orphaning it — §6.6 adopts that wholesale.
+
 ### 6.1 The strong key: GTIN
 
 Barcode/GTIN (validated GTIN-8/12/13/14, check-digit, normalized to 14) is the **only key trusted
@@ -372,11 +473,15 @@ a distributed lock (facts-first, repair-explicitly).
 `ListingKey(storeId, externalId)` — the retailer's own stable id for a listing. Once a listing is
 resolved (auto or human), the link is remembered (`ListingLinked`); **every subsequent scrape of
 that listing short-circuits the matcher entirely.** This is what makes the pipeline cheap in
-steady state: fuzzy matching runs once per new listing, not once per observation.
+steady state: fuzzy matching runs once per new listing, not once per observation. (Flipp caveat,
+§2.6 quirk #4: Flipp item ids are NOT stable — where the source gives no stable listing identity,
+re-resolution runs instead, which the ≥0.92 auto-accept band absorbs.)
 
 ### 6.3 Fuzzy fallback — normalize, then score
 
-Pure functions in `core` (property-tested; this is the code that earns its keep):
+Pure functions in `core` (property-tested; this is the code that earns its keep). The normalizer
+layer is the **shared text lib** (§2.6 — `TextNormalizer`/`BilingualSplitter`, consumed, never
+forked):
 
 1. **Normalize** both sides: lowercase; strip punctuation/accents; extract and remove the
    **size/quantity** (`750ml`, `2 x 1L`, `454 g`) into a structured `Quantity`; extract the
@@ -387,7 +492,7 @@ Pure functions in `core` (property-tested; this is the code that earns its keep)
      the candidate set; core recomputes exactly on the shortlist);
    - brand: exact-normalized match strong positive; *conflicting* known brands strong negative;
    - size compatibility: same `Quantity` class within tolerance positive; incompatible
-     (750 mL vs 4 L) strong negative — sizes distinguish products, not just describe them;
+     (750 mL vs 4 L) strong negative — sizes distinguish products, not just describe them (§6.7);
    - store priors: this store's other listings' resolution history (weak signal, v1.1).
 3. Candidate retrieval is the `match_index` projection (§3): GTIN exact → listing exact →
    trigram top-K (K≈10) → core scorer on the shortlist.
@@ -397,7 +502,7 @@ Pure functions in `core` (property-tested; this is the code that earns its keep)
 | Score | Path A (scraped listing) | Path B (ingredient resolve) |
 |---|---|---|
 | GTIN/listing match | auto-link, confidence 1.0 | `Matched(id, 1.0)` |
-| ≥ 0.92 | auto-link (`ListingLinked` with method+confidence recorded — auditable, reversible by split) | `Matched(id, score)` — caller may still ask the user |
+| ≥ 0.92 | auto-link (`ListingLinked` with method+confidence+matcher-version recorded — auditable, reversible by split) | `Matched(id, score)` — caller may still ask the user |
 | 0.60 – 0.92 | **ResolutionCase → human review**; observation is **parked** (buffered against the case, appended on confirm — no facts recorded against a guessed identity) | `Ambiguous(candidates)` — Dionysus shows a picker; the pick can flow back as `Confirm` |
 | < 0.60 | **auto-create Provisional Product** (`Origin.Scrape`), link, observe — prices flow immediately; the provisional surfaces in a low-priority review lane for naming/merging | `NoMatch` — Dionysus may then call `RegisterProduct` deliberately |
 
@@ -420,10 +525,45 @@ The review queue (ResolutionCase aggregate → review-queue projection → REST)
 Every auto-link records method + confidence, so "why is this listing on this product" is always
 answerable — and reversible. That audit trail is what makes aggressive auto-linking safe.
 
-### 6.6 What resolution is NOT
+### 6.6 Matcher versioning — the inherited Demeter discipline
+
+The resolver algorithm carries an explicit version (`MatcherVersion("v1")`), recorded on **every
+resolution artifact**: `ListingLinked(…, matcher: MatcherVersion)`, every `ScoredCandidate`, every
+`ResolutionCase`, and the `match_index` rows (which store the normalizer version they were built
+with). The rule, inherited from Demeter's `ProductKey.Version` design:
+
+> **A resolver/normalizer change must NEVER invisibly reset or orphan history.** Changing the
+> algorithm bumps the version; existing links stay valid under their recorded version; re-scoring
+> old links under the new version is a *deliberate, observable migration* (a replay-style job that
+> emits explicit re-link/split events), never a silent side effect of a deploy.
+
+Concretely: the `match_index` projection is rebuilt per normalizer version (it's a projection —
+rebuildable by design, §3); auto-link thresholds are evaluated against scores of the *same*
+version only; and a version bump shows up in metrics (resolver outcomes are labeled by
+`matcher_version`) so a regression is visible, not archaeological.
+
+### 6.7 One ProductId = one pack size — DECIDED, stated plainly
+
+Asked explicitly during the Demeter alert-dedup decision (Calvin decided (b), 2026-08-26 — see
+§10.7 and `migration-demeter.md`), because Demeter's alert rendering depends on the answer:
+
+> **Does Ariadne's resolver merge across pack sizes? NO.** Product identity includes size.
+> GTINs are size-specific (454 g Lactantia and 250 g Lactantia are DIFFERENT products with
+> different GTINs), and the fuzzy matcher already treats size incompatibility as a strong
+> *negative* signal (§6.3). A `ProductId` therefore implies **one pack size**, and "best price
+> across stores" for that id is the lowest **effective price** — apples-to-apples by
+> construction.
+
+If a consumer ever wants cross-size comparison ("cheapest butter per gram, any size"), that is a
+**downstream layer**: a Demeter watchlist-of-products compared on **unit price** — never an
+Ariadne merge. Merging sizes here would destroy the apples-to-apples property everything above
+relies on.
+
+### 6.8 What resolution is NOT
 
 Not enrichment (no nutrition lookup — Dionysus), not categorization for deals (Demeter), not a
-general entity-resolution platform. One engine, two callers, human backstop.
+general entity-resolution platform — and **not a cross-size unifier** (§6.7). One engine, two
+callers, human backstop.
 
 ---
 
@@ -454,10 +594,14 @@ budgeting feed.
   one traceable thread.
 - **Health/metrics:** `/health` liveness + readiness (journal, projection lag, Hermes lag);
   `/metrics` Prometheus with Hera scrape annotations. Key gauges/counters: observations appended
-  (by source), resolver outcomes (by band — the auto-link/review/new-product mix is THE service
-  health signal), review-queue depth + age, publisher lag, scrape-run success.
+  (by source), resolver outcomes (by band and by `matcher_version` — the
+  auto-link/review/new-product mix is THE service health signal), review-queue depth + age,
+  publisher lag, scrape-run success.
 - **Persistence ops:** Postgres via pg-service chart; pg-dump→S3 backups; journal is the source
   of truth, every read model rebuildable (§3).
+- **Raw-source archive + replay (§2.6):** every scraped response archived (Apollo blob) before
+  parse; observations re-derivable from the archive. First-class requirement — flyers expire, so
+  the archive is the only insurance against a bad decoder deploy permanently poisoning the corpus.
 - **Secrets:** SOPS+age → k8s Secret (Harpocrates story) for scraper credentials/API keys, Hermes
   auth if/when it lands.
 - **ariadne-ui** (later): Next.js, dark-only, the god mark (pending — constellation-logo
@@ -470,7 +614,7 @@ budgeting feed.
 |---|---|---|
 | Dionysus: shopping list needs identity + current price NOW; ingredient→product resolve | **gRPC** (GetProduct / ResolveProduct / GetCurrentPrice) | blocked-and-waiting |
 | Demeter: deal evaluation on every new price | **Hermes** `product.price.observed` | reaction / fan-out |
-| Demeter: history/context on demand | **gRPC** (GetPriceHistory / GetProduct) | blocked-and-waiting |
+| Demeter: history/context on demand; demeter-insight's history endpoint + chart | **gRPC** (GetPriceHistory / GetProduct) | blocked-and-waiting |
 | New-product / merge awareness (both consumers, optional) | **Hermes** `product.registered` | reaction |
 | Future budgeting | **Hermes** `purchase.recorded` (+ gRPC ListPurchases) | reaction (+ pull) |
 | ariadne-ui | **REST** (+ self-hosted `/docs`, Insomnia collection) | browser/BFF rule |
@@ -485,6 +629,24 @@ budgeting feed.
 3. Store granularity: chain vs individual location (prices differ by location for some chains).
    v1: chain-level with optional location; revisit when it hurts.
 4. Receipt-OCR worker placement (Argus-style worker vs in-service) — v2 question.
+5. **Shared text-normalization artifact** (§2.6): `TextNormalizer` + `BilingualSplitter` must be
+   consumed by BOTH Ariadne (matcher + fact extraction) and Demeter (its remaining pipeline)
+   without forking. Proposal: a small published Scala lib (`catalog-text-core`, GitHub Packages).
+   **Where it lives and who owns it needs Calvin + Demeter + Lexicon coordination** — new repo vs
+   published from an existing one vs Lexicon-adjacent.
+6. **Lexicon contract additions** from the Demeter review: `price_confidence` + `size_confidence`
+   on `PriceObserved`/`PricePoint` (§2.3 — the size-ambiguity coupling is contract-required), and
+   whether `matcher_version` should be surfaced on resolution responses. Propose with the rest of
+   `ariadne.v1`.
+7. **Demeter alert dedup under cross-merchant ids — DECIDED by Calvin, 2026-08-26: option (b).**
+   Dedup per `(watchId, ProductId, window)`; the alert names the **best price across stores**.
+   Option (a) — per-store AlertKeys — was both sessions' recommendation and was NOT taken. (b) is
+   a real product design that must be *designed* (future work Calvin schedules), not inherited
+   from the id-map rewrite. The four design inputs the Demeter session surfaced (re-fire on
+   better price is already free; the per-flyer-window trap that silently degrades (b) back to
+   (a); the one-id-one-size answer — §6.7, Ariadne's half, answered; the rolling-stats baseline
+   consequence) are recorded in `migration-demeter.md`. Ariadne's contract part is done:
+   `PriceObserved` carries `storeId` + both confidences.
 
 ## 11. Build order (suggested)
 
@@ -495,7 +657,9 @@ budgeting feed.
 5. gRPC surface (stub the Lexicon contract locally while the proposal is reviewed).
 6. Hermes publisher projection + topic self-provisioning (client pinned @v1.13.0).
 7. ResolutionCase + review queue + REST + `/docs` + Insomnia.
-8. Scraper adapter (Flipp first — port, don't rewrite, Demeter's source; see
-   `migration-demeter.md`).
+8. Scraper adapter (Flipp first — port Demeter's ingestion incl. the fetch ledger, rate
+   limit/bot-wall handling, and the merchant re-stamp; **raw-archive + replay from day one**;
+   §2.6 + `migration-demeter.md`). Blocked on the shared text-lib decision (§10.5) — stub it
+   behind an interface until the artifact exists.
 9. Purchase v1 (manual) + the price-append process manager.
 10. Migrations per `migration-demeter.md` / `migration-dionysus.md`.
