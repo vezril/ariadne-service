@@ -1,0 +1,160 @@
+package me.cference.ariadne.domain
+package price
+
+import java.time.{Instant, ZoneId}
+
+/**
+ * Where a price fact came from. Ordered by how much we trust it: a price actually PAID beats a
+ * flyer's claim about a price.
+ */
+enum PriceSource {
+  case Scrape(scraper: String)
+  case Purchase(purchaseId: PurchaseId)
+  case Manual
+  case Backfill(origin: String)
+}
+
+/**
+ * The stream's state is only what validation needs — this aggregate IS its event stream, so there
+ * is nothing to fold up beyond the dedup window.
+ */
+final case class LastObservation(at: Instant, price: Money, source: PriceSource)
+
+enum PriceStreamState {
+  case Empty
+  case Open(productId: ProductId, storeId: StoreId, last: Option[LastObservation], count: Long)
+}
+
+enum PriceCommand {
+  case ObservePrice(
+      productId: ProductId,
+      storeId: StoreId,
+      price: Money,
+      observedAt: Instant,
+      source: PriceSource,
+      unitPrice: Option[UnitPrice],
+      promo: Option[PromoFlag],
+      priceConfidence: Confidence,
+      sizeConfidence: Confidence,
+      correlationId: CorrelationId
+  )
+  case RetractObservation(observedAt: Instant, reason: String, correlationId: CorrelationId)
+}
+
+enum PriceEvent {
+  case PriceObserved(
+      productId: ProductId,
+      storeId: StoreId,
+      price: Money,
+      unitPrice: Option[UnitPrice],
+      promo: Option[PromoFlag],
+      priceConfidence: Confidence,
+      sizeConfidence: Confidence,
+      observedAt: Instant,
+      source: PriceSource
+  )
+  case PriceObservationRetracted(observedAt: Instant, reason: String)
+}
+
+/**
+ * An append-only stream of price facts for one product x store pair.
+ *
+ * There is no update and no delete. A wrong observation is corrected by a later
+ * `PriceObservationRetracted`, never by mutation — because Demeter scores against this history, and
+ * history that silently rewrites itself is not history.
+ *
+ * Both confidences ride every event and are CONTRACT-REQUIRED (§2.3). Demeter computes
+ * `matchConfidence = split.confidence.min(sizeConfidence)`; size parsing lives here while match
+ * judgment lives there, so dropping sizeConfidence would make Demeter's confidence silently read
+ * too high.
+ */
+object PriceObservation {
+
+  /** Canadian retail; the dedup window is a *calendar* day, so it needs a zone. */
+  val DefaultZone: ZoneId = ZoneId.of("America/Toronto")
+
+  def decide(
+      state: PriceStreamState,
+      cmd: PriceCommand,
+      now: Instant,
+      zone: ZoneId = DefaultZone
+  ): Either[DomainError, List[PriceEvent]] =
+    cmd match {
+      case c: PriceCommand.ObservePrice =>
+        if c.observedAt.isAfter(now) then
+          Left(DomainError.ObservationInFuture(c.observedAt.toString))
+        else if isDuplicate(state, c, zone) then Right(Nil)
+        else
+          Right(
+            List(
+              PriceEvent.PriceObserved(
+                c.productId,
+                c.storeId,
+                c.price,
+                c.unitPrice,
+                c.promo,
+                c.priceConfidence,
+                c.sizeConfidence,
+                c.observedAt,
+                c.source
+              )
+            )
+          )
+
+      case c: PriceCommand.RetractObservation =>
+        state match {
+          case PriceStreamState.Empty => Left(DomainError.NotRegistered)
+          case _: PriceStreamState.Open =>
+            Right(List(PriceEvent.PriceObservationRetracted(c.observedAt, c.reason)))
+        }
+    }
+
+  /**
+   * Same price, same source, same calendar day => nothing new was learned.
+   *
+   * Scrapes repeat within a day; without this the history fills with duplicates that would skew any
+   * rolling statistic computed over it.
+   */
+  private def isDuplicate(
+      state: PriceStreamState,
+      c: PriceCommand.ObservePrice,
+      zone: ZoneId
+  ): Boolean =
+    state match {
+      case PriceStreamState.Empty => false
+      case PriceStreamState.Open(_, _, last, _) =>
+        last.exists { l =>
+          l.price == c.price &&
+          l.source == c.source &&
+          l.at.atZone(zone).toLocalDate == c.observedAt.atZone(zone).toLocalDate
+        }
+    }
+
+  def evolve(state: PriceStreamState, event: PriceEvent): PriceStreamState =
+    (state, event) match {
+      case (PriceStreamState.Empty, e: PriceEvent.PriceObserved) =>
+        PriceStreamState.Open(
+          e.productId,
+          e.storeId,
+          Some(LastObservation(e.observedAt, e.price, e.source)),
+          1L
+        )
+
+      case (PriceStreamState.Empty, _) => PriceStreamState.Empty
+
+      case (s: PriceStreamState.Open, e: PriceEvent.PriceObserved) =>
+        // Out-of-order replay (a backfill carrying original timestamps) must not
+        // let an older fact overwrite the dedup anchor.
+        val next =
+          if s.last.forall(l => !e.observedAt.isBefore(l.at)) then
+            Some(LastObservation(e.observedAt, e.price, e.source))
+          else s.last
+        s.copy(last = next, count = s.count + 1)
+
+      case (s: PriceStreamState.Open, _: PriceEvent.PriceObservationRetracted) =>
+        s.copy(count = math.max(0L, s.count - 1))
+    }
+
+  def replay(events: List[PriceEvent]): PriceStreamState =
+    events.foldLeft[PriceStreamState](PriceStreamState.Empty)(evolve)
+}
