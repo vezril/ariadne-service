@@ -273,7 +273,7 @@ session):
 |---|---|
 | `UnitPriceCalculator`, `PriceTextParser`, `MultiBuyParser`, `PercentOffParser` | **Move to Ariadne** — they compute *facts*. (The percent-off *number* is a fact; the is-it-a-deal *verdict* on it stays Demeter.) |
 | `ObservationAssembler` | **The fact/judgment boundary itself** — its successor is Ariadne's `PriceObserved` producer (the last pipeline stage above) |
-| `TextNormalizer`, `BilingualSplitter` | **SHARED LIBRARY — not a move.** Used by BOTH the matcher and fact extraction; `minFuzzyLength=7` is tuned against a real production false positive. **Never fork** (two drifting copies = bug generator). Design: extract into a small published Scala artifact (proposal: `catalog-text-core`, published via GitHub Packages like the Lexicon stubs, versioned, consumed by both Ariadne and Demeter). *Home + ownership is an open coordination point — §10.* |
+| `TextNormalizer`, `BilingualSplitter` | **SHARED LIBRARY — not a move.** Used by BOTH the matcher and fact extraction; `minFuzzyLength=7` is tuned against a real production false positive. **Never fork** (two drifting copies = bug generator). **DECIDED (Calvin, 2026-08-26): Ariadne owns it, embedded in `core` as the self-contained package `me.cference.ariadne.text`; publishing a separate artifact is deferred until a third consumer exists.** The island rule (zero imports from Ariadne's domain types; supporting types defined inside the package) is what keeps that extraction cheap — see §10.5. Demeter's `Confidence` becomes `SplitConfidence` on the way in, to avoid colliding with §6's match score. |
 | `FlippSource` / `FlyerSource` / `FlippDecoders`, the fetch ledger, rate limiting | **Move to Ariadne** (port, don't rewrite) |
 | `PriceStats`, `DealVerdict`, watchlist/alerting/insight/CPI | **Stay in Demeter** (judgments), now fed by Ariadne |
 
@@ -629,11 +629,48 @@ budgeting feed.
 3. Store granularity: chain vs individual location (prices differ by location for some chains).
    v1: chain-level with optional location; revisit when it hurts.
 4. Receipt-OCR worker placement (Argus-style worker vs in-service) — v2 question.
-5. **Shared text-normalization artifact** (§2.6): `TextNormalizer` + `BilingualSplitter` must be
-   consumed by BOTH Ariadne (matcher + fact extraction) and Demeter (its remaining pipeline)
-   without forking. Proposal: a small published Scala lib (`catalog-text-core`, GitHub Packages).
-   **Where it lives and who owns it needs Calvin + Demeter + Lexicon coordination** — new repo vs
-   published from an existing one vs Lexicon-adjacent.
+5. **Shared text-normalization artifact — DECIDED by Calvin, 2026-08-26: Ariadne owns it,
+   embedded, extraction deferred.** `TextNormalizer` + `BilingualSplitter` must be consumed by
+   BOTH Ariadne (matcher + fact extraction) and Demeter (its remaining pipeline) **without
+   forking** — two drifting copies is a bug generator, and `minFuzzyLength=7` is tuned against a
+   real production false positive. The v1 proposal was a separately published lib
+   (`catalog-text-core`, GitHub Packages). **Not taken now.** The shared surface is ~265 lines of
+   pure, zero-dependency functions; a dedicated repo + CI + publish pipeline + cross-session
+   release train is disproportionate at that size, and it puts a release-and-two-bumps latency on
+   exactly the code whose whole point is tuning.
+
+   **Decision:** the code lives in `core` as a self-contained package, `me.cference.ariadne.text`.
+   Ariadne owns it because ownership follows use — after the migration Ariadne runs the matcher,
+   fact extraction, and the resolver, so this is hot spot #1's foundation, while Demeter's use
+   shrinks as ingestion moves out. The dependency direction also already exists: Demeter consumes
+   Ariadne for prices and history, so one more edge the same way is consistent; the reverse would
+   make the upstream facts supplier depend on a downstream consumer.
+
+   **Why embedded under uncertainty** (there may or may not ever be a third consumer — Calvin,
+   asked directly, doesn't know): the two options fail asymmetrically. Embedded-then-extract costs
+   one mechanical extraction, paid once, at the point we actually know. Separate-repo-never-needed
+   costs permanent overhead forever. Under genuine uncertainty the cheap-to-reverse option wins.
+
+   **THE ISLAND RULE — load-bearing, this is what keeps extraction cheap.** The package must stay
+   self-contained: zero imports from Ariadne's domain types, its own supporting types
+   (`BilingualText`, `Locale`, and its confidence notion) defined *inside* it, and nothing in
+   `core`'s domain reaching in except through the normalizer/splitter entry points. If `ProductId`
+   or `Quantity` ever leaks in, the package is welded to the service and this decision silently
+   becomes irreversible.
+
+   **Naming collision to avoid:** Demeter's `Confidence` is `Low | Medium | High` (text-split
+   confidence); Ariadne's `Confidence` (§6) is a match score in `[0,1]` on `ListingLinked`. Same
+   name, different concepts — the text one becomes `SplitConfidence` on the way in. Do NOT unify
+   them.
+
+   **Revisit when:** a third consumer appears (Dionysus needing bilingual splitting for ingredient
+   matching, a future Plutus, anything). Two consumers with a clear upstream/downstream
+   relationship does not justify a shared repo; three peers would. At that point extract the
+   package as-is — that is what the island rule buys.
+
+   G3 in `migration-demeter.md` is a **pre-cutover** gate, not a pre-build one: this decision
+   unblocks building `core` now, and Demeter consumes the published artifact only when the
+   migration actually runs.
 6. **Lexicon contract additions** from the Demeter review: `price_confidence` + `size_confidence`
    on `PriceObserved`/`PricePoint` (§2.3 — the size-ambiguity coupling is contract-required), and
    whether `matcher_version` should be surfaced on resolution responses. Propose with the rest of

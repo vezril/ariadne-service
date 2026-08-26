@@ -194,7 +194,7 @@ HermesMQ v1.13.0 tracing makes scrape→observation→alert one traceable thread
 |---|---|---|---|
 | G1 | **AlertKey: (b) DECIDED by Calvin 2026-08-26** — dedup per `(watchId, ProductId, window)`, alert names best price across stores. Gate = the **(b) design exists** (future work Calvin schedules) and covers the four inputs above — especially the per-flyer-window trap (#2), without which (b) silently degrades to (a) | **Demeter** (design) · Calvin (scheduling) | decided; design pending |
 | G2 | `size_confidence` (+ `price_confidence`) on `PriceObserved` across event/Hermes/gRPC | Ariadne | **committed — in DESIGN §2.3 + the Lexicon proposal** |
-| G3 | TextNormalizer/BilingualSplitter shared artifact designed (home + ownership settled; no forks anywhere) | Ariadne+Demeter+Calvin | **designed (DESIGN §2.6); home/ownership open (§10.5)** |
+| G3 | TextNormalizer/BilingualSplitter shared artifact designed (home + ownership settled; no forks anywhere) | Ariadne+Demeter+Calvin | **CLOSED — Calvin decided 2026-08-26: Ariadne owns it, embedded in `core` (`me.cference.ariadne.text`), published for you when the migration needs it. No forks anywhere. DESIGN §10.5** |
 | G4 | Raw-archive + replay owned by Ariadne (archive-before-parse, re-derivable observations) | Ariadne | **committed — DESIGN §2.6 requirement** |
 
 None of these gates blocks steps 1–3 — backfill and dual-run proceed while the (b) design is
@@ -232,7 +232,7 @@ decision above; the four (b)-design inputs from your code are captured with it.
 **Still open:**
 1. **G1's remaining half** — the (b) design itself (Calvin schedules; your `AlertDedup`/window
    machinery is the starting point, and the per-flyer-window trap is the thing to not miss).
-2. Shared text-lib home + ownership (G3's remaining half) — needs Calvin.
+2. ~~Shared text-lib home + ownership (G3's remaining half)~~ — **RESOLVED** (Calvin, 2026-08-26): Ariadne owns it, embedded in `core`; you consume a published artifact when the migration runs, never a fork. Detail + the island rule in DESIGN §10.5.
 3. Export timing for step 2 (whenever cheap for you; format's settled).
 4. Anything in the ported-quirks list (DESIGN §2.6) we've misread — corrections welcome before we
    write the port.
