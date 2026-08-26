@@ -1,0 +1,76 @@
+name: CI
+
+# Verifies every pull request targeting development or main: formatting,
+# compilation, and the full test suite. Merging is blocked unless all required
+# checks pass (branch protection).
+on:
+  pull_request:
+    branches: [development, main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: CI only reads the repo (no package/image publish here).
+permissions:
+  contents: read
+
+jobs:
+  # Formatting is a separate job so a scalafmt violation fails independently of
+  # the tests (a green test suite must not mask a format failure).
+  format:
+    name: Format (scalafmt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: ./.github/actions/setup-scala
+      - name: Check formatting
+        run: sbt -batch scalafmtCheckAll scalafmtSbtCheck
+
+  build-test:
+    name: Compile & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0 # sbt-dynver needs full history + tags
+      - uses: ./.github/actions/setup-scala
+      - name: Compile
+        run: sbt -batch compile Test/compile
+      - name: Test (with coverage)
+        # Coverage is reported, not gated — add `coverageMinimumStmtTotal := N` in build.sbt to enforce.
+        run: sbt -batch clean coverage test coverageReport
+
+  # sbt-dynver sanity: an untagged commit must yield a snapshot (non-releasable)
+  # version so releases can only come from an explicit tag.
+  version-check:
+    name: Version derivation (dynver)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-scala
+      - name: Assert untagged build is a snapshot
+        run: |
+          VERSION=$(sbt -Dsbt.log.noformat=true -batch -error 'print version' | tail -n1 | perl -pe 's/\e\[[0-9;]*[a-zA-Z]//g' | tr -d '[:space:]')
+          echo "Derived version: $VERSION"
+          case "$VERSION" in
+            *SNAPSHOT*|*-*-*) echo "OK: snapshot version" ;;
+            *) echo "ERROR: untagged build produced a clean release version '$VERSION'"; exit 1 ;;
+          esac
+
+  # Secret scanning — fail the PR if a credential was committed (language-agnostic).
+  secrets-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0 # scan full history
+      - name: gitleaks
+        run: |
+          V=8.18.4
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz" \
+            | tar xz -C /tmp gitleaks
+          /tmp/gitleaks detect --source . --redact --verbose
