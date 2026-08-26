@@ -43,3 +43,46 @@ pg-service; chart + `apps/ariadne` pin in codex; deploys are the Codex session's
 per `codex/docs/session-coordination.md`. Mark: none yet (generate via the constellation-logo
 pipeline). Migration to coordinate with the **Demeter** (scraper + price-history move out) and
 **Dionysus** (products move out) sessions.
+
+## Build & run
+
+Two modules, mirroring the design's hard line between pure domain and runtime:
+
+- `core/` — pure domain, **zero Pekko deps**: value types, `decide`/`evolve`, and the
+  matching algebra (normalizers + scorer) of [DESIGN §6](docs/DESIGN.md). Unit-tested.
+- `server/` — Pekko HTTP runtime, `Main`, config, health routes, Docker packaging.
+
+```bash
+sbt compile          # build both modules
+sbt test             # run the suite
+sbt server/run       # start on :8080 (HTTP_PORT overrides)
+sbt scalafmtAll      # format
+```
+
+Endpoints so far are scaffold-level: `GET /` → hello; `GET /health` → status/service/version
+JSON (503 while shutting down). The domain surfaces of DESIGN §4-§5 are not built yet.
+
+Docker:
+
+```bash
+sbt server/Docker/publishLocal
+docker run -p 8080:8080 calvinference/ariadne:<version>
+```
+
+## Versioning & CI
+
+Versions are git-tag-driven via sbt-dynver — no version literal is committed.
+
+- `ci.yml` — on PRs to `development`/`main`: scalafmt check, compile + test with coverage,
+  dynver sanity, gitleaks scan.
+- `dev.yml` — pushes to `development` publish `:dev` and `:dev-<sha>` images.
+- `release.yml` — a `vX.Y.Z` tag on `main` publishes immutable `:X.Y.Z` + `:latest` and cuts
+  a GitHub Release.
+
+Image publishing needs the `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` secrets; **they are not
+set yet**, so image steps skip and the workflows stay green. Wiring them later needs no CI
+change. Deploys are the Codex session's.
+
+## License
+
+MIT — see [LICENSE.md](LICENSE.md).
