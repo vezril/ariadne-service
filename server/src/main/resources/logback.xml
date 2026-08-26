@@ -1,0 +1,23 @@
+<configuration>
+  <!-- Structured logging with a dev/prod toggle. LOG_FORMAT=json (the Docker image sets it) emits
+       one JSON object per event for machine parsing (Loki, error tracking); unset (local dev) gives
+       human-readable text. Field shape per the constellation "add-structured-logging" spec. -->
+  <property name="LOG_APPENDER" value="${LOG_FORMAT:-text}"/>
+
+  <appender name="json" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+      <!-- stamp the service name on every event so logs are attributable across the constellation -->
+      <customFields>{"service":"ariadne"}</customFields>
+    </encoder>
+  </appender>
+
+  <appender name="text" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%date{ISO8601} %-5level [%thread] %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <root level="INFO">
+    <appender-ref ref="${LOG_APPENDER}"/>
+  </root>
+</configuration>
