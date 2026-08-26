@@ -1,0 +1,114 @@
+name: Release
+
+# Publishes a Docker image to Docker Hub when a semver tag vX.Y.Z is pushed on
+# main. The tag pattern below is the first gate: malformed tags never trigger.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# gh release create needs write; nothing else does.
+permissions:
+  contents: write
+
+env:
+  IMAGE_NAME: ariadne
+
+jobs:
+  release:
+    name: Test, build, and publish
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'vezril'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0 # full history for dynver + ancestry check
+
+      # A tag must sit on main's first-parent history to release: this rejects a
+      # tag on a feature commit that merely happens to be reachable from main.
+      - name: Verify tag is on main
+        env:
+          TAG_SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          git fetch --no-tags origin main
+          if git rev-list --first-parent origin/main | grep -qx "$TAG_SHA"; then
+            echo "OK: $REF_NAME is on main's first-parent history"
+          else
+            echo "ERROR: tag $REF_NAME is not on main's first-parent history — refusing to release"
+            exit 1
+          fi
+
+      # Fail before any build/push if credentials are absent (no partial publish).
+      # Publishing degrades gracefully: absent Docker Hub secrets SKIP the image
+      # steps (steps below gate on this output) instead of failing the workflow —
+      # a project without a Docker Hub repo still gets green CI. secrets.* is not
+      # readable in `if:`, hence this env indirection.
+      - name: Check Docker Hub credentials
+        id: creds
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "NOTICE: Docker Hub secrets absent — image publish steps will be SKIPPED."
+          fi
+
+      - uses: ./.github/actions/setup-scala
+
+      - name: Log in to Docker Hub
+        if: steps.creds.outputs.present == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Semver image tags are immutable — only :latest ever moves.
+      - name: Enforce semver tag immutability
+        if: steps.creds.outputs.present == 'true'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION="${REF_NAME#v}"
+          if docker manifest inspect "$DOCKERHUB_USERNAME/$IMAGE_NAME:$VERSION" >/dev/null 2>&1; then
+            echo "ERROR: $DOCKERHUB_USERNAME/$IMAGE_NAME:$VERSION already exists — semver tags are immutable"
+            exit 1
+          fi
+          echo "OK: $VERSION is not yet published"
+
+      # Nothing is pushed unless the whole suite passes first.
+      - name: Run tests
+        run: sbt -batch test
+
+      - name: Build image
+        if: steps.creds.outputs.present == 'true'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: sbt -batch server/Docker/publishLocal
+
+      - name: Tag and push X.Y.Z + latest
+        if: steps.creds.outputs.present == 'true'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION="${REF_NAME#v}"
+          LOCAL="$DOCKERHUB_USERNAME/$IMAGE_NAME:$VERSION" # dynver on a clean tag == X.Y.Z
+          for TARGET in "$DOCKERHUB_USERNAME/$IMAGE_NAME:$VERSION" "$DOCKERHUB_USERNAME/$IMAGE_NAME:latest"; do
+            docker tag "$LOCAL" "$TARGET"
+            docker push "$TARGET"
+          done
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_NAME: ${{ github.ref_name }}
+        run: gh release create "$REF_NAME" --generate-notes --title "$REF_NAME"
