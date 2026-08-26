@@ -1,0 +1,7 @@
+target/
+.bsp/
+.bloop/
+.metals/
+.env
+__pycache__/
+node_modules/
