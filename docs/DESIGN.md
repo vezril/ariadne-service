@@ -405,7 +405,7 @@ schema-evolution story for read models). Offsets in the standard projection offs
 | **purchase-history** | Purchase | `purchases`, `purchase_lines` | ListPurchases; future budgeting queries |
 | **resolver/match index** | Product | `match_index(product_id, normalized_name, name_tokens, trigrams tsvector/pg_trgm, brand_norm, size_class)` + the gtin + listing tables above; rows record the normalizer/matcher version they were built with (§6.6) | ResolveProduct scoring (§6.4); the GTIN-uniqueness guard |
 | **review-queue** | ResolutionCase | `resolution_cases(id, state, subject, candidates_json, created_at)` | ariadne-ui review screens |
-| **store-coverage** | Store | `store_coverage(store_id, chain_id, area)` — which franchises an `Area(chain, area)` observation speaks for | the read-time fan-out of §2.3.1; rebuilt from the Store journal like everything else |
+| **store-coverage** | Store | `store_coverage(store_id, chain_id, area)` — which franchises an `Area(chain, area)` observation speaks for. **Stateful and it goes stale**: a chain re-districts or a franchise closes and the mapping is silently wrong. There is no authoritative source in the feed — it is inferred from which postal codes returned which merchant's flyer, so treat it as maintained data, not a derived join. Cheap today only because Calvin shops a handful of stores — a fact about current usage, NOT a property of the design | the read-time fan-out of §2.3.1; rebuilt from the Store journal like everything else |
 | **hermes-publisher** | Product, PriceObservation, Purchase | (offset only) | §5 — the outbox projection |
 | **price-append process manager** | Purchase | (offset only) | issues `ObservePrice(source=Purchase)` per line (§2.4) |
 
