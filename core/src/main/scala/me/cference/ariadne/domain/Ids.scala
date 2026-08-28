@@ -7,7 +7,27 @@ package me.cference.ariadne.domain
  * catalog owns identity, and identity is a name for a thing, not a place to hang behaviour.
  */
 final case class ProductId(value: String) extends AnyVal
+
+/**
+ * An INDIVIDUAL FRANCHISE, not a banner (§2.2, revised 2026-08-28). "Is IGA running this?" is a
+ * query across a chain's stores, not a row.
+ */
 final case class StoreId(value: String) extends AnyVal
+
+/**
+ * The banner a franchise belongs to — IGA, Metro, Provigo. The rollup axis, and half the identity
+ * of an area-scoped price fact, so it is required rather than an optional label.
+ */
+final case class ChainId(value: String) extends AnyVal
+
+/**
+ * The flyer-coverage region (FSA-shaped postal prefix).
+ *
+ * Flipp scopes every response by postal code, so this is the finest grain a scraped price can
+ * honestly claim — see PriceScope.
+ */
+final case class Area(postalPrefix: String) extends AnyVal
+
 final case class PurchaseId(value: String) extends AnyVal
 
 /**

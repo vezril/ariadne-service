@@ -22,13 +22,13 @@ final case class LastObservation(at: Instant, price: Money, source: PriceSource)
 
 enum PriceStreamState {
   case Empty
-  case Open(productId: ProductId, storeId: StoreId, last: Option[LastObservation], count: Long)
+  case Open(productId: ProductId, scope: PriceScope, last: Option[LastObservation], count: Long)
 }
 
 enum PriceCommand {
   case ObservePrice(
       productId: ProductId,
-      storeId: StoreId,
+      scope: PriceScope,
       price: Money,
       observedAt: Instant,
       source: PriceSource,
@@ -44,7 +44,7 @@ enum PriceCommand {
 enum PriceEvent {
   case PriceObserved(
       productId: ProductId,
-      storeId: StoreId,
+      scope: PriceScope,
       price: Money,
       unitPrice: Option[UnitPrice],
       promo: Option[PromoFlag],
@@ -89,7 +89,7 @@ object PriceObservation {
             List(
               PriceEvent.PriceObserved(
                 c.productId,
-                c.storeId,
+                c.scope,
                 c.price,
                 c.unitPrice,
                 c.promo,
@@ -122,8 +122,15 @@ object PriceObservation {
   ): Boolean =
     state match {
       case PriceStreamState.Empty => false
-      case PriceStreamState.Open(_, _, last, _) =>
-        last.exists { l =>
+      case PriceStreamState.Open(_, scope, last, _) =>
+        // Scope is part of the identity of a price fact, not a detail of it. A
+        // receipt at one store and a flyer covering that store's chain+region can
+        // carry the same number on the same day and still be two DIFFERENT facts —
+        // and the receipt is the better one. Deduping across scopes would silently
+        // drop it. In practice each stream is per-scope (entity id
+        // `price|{productId}|{scope}`), but `decide` is pure and must not depend on
+        // the caller having routed correctly.
+        scope == c.scope && last.exists { l =>
           l.price == c.price &&
           l.source == c.source &&
           l.at.atZone(zone).toLocalDate == c.observedAt.atZone(zone).toLocalDate
@@ -135,7 +142,7 @@ object PriceObservation {
       case (PriceStreamState.Empty, e: PriceEvent.PriceObserved) =>
         PriceStreamState.Open(
           e.productId,
-          e.storeId,
+          e.scope,
           Some(LastObservation(e.observedAt, e.price, e.source)),
           1L
         )
