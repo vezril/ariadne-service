@@ -41,6 +41,11 @@ ThisBuild / scalacOptions ++= Seq(
 
 lazy val pekkoVersion = "1.2.0"
 lazy val pekkoHttpVersion = "1.2.0"
+// Aligned with apollo-storage so pekko-projection (which pulls pekko 1.2.x /
+// r2dbc 1.1.x) does not create a mixed-version classpath — Pekko forbids that.
+lazy val pekkoR2dbcVersion = "1.1.0"
+lazy val pekkoProjectionVersion = "1.1.0"
+lazy val testcontainersVersion = "0.41.4"
 lazy val scalaTestVersion = "3.2.19"
 lazy val scalaCheckPlusVersion = "3.2.19.0"
 lazy val logbackVersion = "1.5.16"
@@ -83,9 +88,23 @@ lazy val server = (project in file("server"))
       "ch.qos.logback" % "logback-classic" % logbackVersion,
       // Structured JSON logs (the constellation log schema — see the add-structured-logging spec).
       "net.logstash.logback" % "logstash-logback-encoder" % logstashEncoderVersion,
+      // --- persistence + read-side projections (DESIGN §2, §3) ---
+      "org.apache.pekko" %% "pekko-persistence-typed" % pekkoVersion,
+      "org.apache.pekko" %% "pekko-serialization-jackson" % pekkoVersion,
+      "org.apache.pekko" %% "pekko-persistence-r2dbc" % pekkoR2dbcVersion,
+      // Explicit since r2dbc 1.1.0 (transitive in 1.0.0).
+      "org.postgresql" % "r2dbc-postgresql" % "1.0.7.RELEASE",
+      "org.apache.pekko" %% "pekko-projection-r2dbc" % pekkoProjectionVersion,
+      "org.apache.pekko" %% "pekko-projection-eventsourced" % pekkoProjectionVersion,
       "org.apache.pekko" %% "pekko-actor-testkit-typed" % pekkoVersion % Test,
+      "org.apache.pekko" %% "pekko-persistence-testkit" % pekkoVersion % Test,
       "org.apache.pekko" %% "pekko-http-testkit" % pekkoHttpVersion % Test,
-      "org.scalatest" %% "scalatest" % scalaTestVersion % Test
+      "org.scalatest" %% "scalatest" % scalaTestVersion % Test,
+      // Real Postgres for projection tests — a mocked journal would prove nothing
+      // about the SQL these projections actually run.
+      "com.dimafeng" %% "testcontainers-scala-scalatest" % testcontainersVersion % Test,
+      "com.dimafeng" %% "testcontainers-scala-postgresql" % testcontainersVersion % Test,
+      "org.postgresql" % "postgresql" % "42.7.4" % Test
     ),
     // BuildInfo exposes the dynver version to the running app (health endpoint).
     buildInfoKeys := Seq[BuildInfoKey](name, version, scalaVersion, sbtVersion),

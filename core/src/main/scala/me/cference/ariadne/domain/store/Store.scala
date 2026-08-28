@@ -40,10 +40,22 @@ enum StoreCommand {
   case DeactivateStore(correlationId: CorrelationId)
 }
 
-enum StoreEvent {
-  case StoreRegistered(id: StoreId, name: String, chain: ChainId, area: Area, label: Option[String])
-  case StoreDetailsUpdated(name: Option[String], area: Option[Area], label: Option[String])
-  case StoreDeactivated
+sealed trait StoreEvent extends CborSerializable
+
+object StoreEvent {
+  final case class StoreRegistered(
+      id: StoreId,
+      name: String,
+      chain: ChainId,
+      area: Area,
+      label: Option[String]
+  ) extends StoreEvent
+  final case class StoreDetailsUpdated(
+      name: Option[String],
+      area: Option[Area],
+      label: Option[String]
+  ) extends StoreEvent
+  case object StoreDeactivated extends StoreEvent
 }
 
 object Store {

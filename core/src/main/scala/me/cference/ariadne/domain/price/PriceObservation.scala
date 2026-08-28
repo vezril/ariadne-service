@@ -7,11 +7,13 @@ import java.time.{Instant, ZoneId}
  * Where a price fact came from. Ordered by how much we trust it: a price actually PAID beats a
  * flyer's claim about a price.
  */
-enum PriceSource {
-  case Scrape(scraper: String)
-  case Purchase(purchaseId: PurchaseId)
-  case Manual
-  case Backfill(origin: String)
+sealed trait PriceSource
+
+object PriceSource {
+  final case class Scrape(scraper: String) extends PriceSource
+  final case class Purchase(purchaseId: PurchaseId) extends PriceSource
+  case object Manual extends PriceSource
+  final case class Backfill(origin: String) extends PriceSource
 }
 
 /**
@@ -41,8 +43,10 @@ enum PriceCommand {
   case RetractObservation(observedAt: Instant, reason: String, correlationId: CorrelationId)
 }
 
-enum PriceEvent {
-  case PriceObserved(
+sealed trait PriceEvent extends CborSerializable
+
+object PriceEvent {
+  final case class PriceObserved(
       productId: ProductId,
       scope: PriceScope,
       price: Money,
@@ -52,8 +56,8 @@ enum PriceEvent {
       sizeConfidence: Confidence,
       observedAt: Instant,
       source: PriceSource
-  )
-  case PriceObservationRetracted(observedAt: Instant, reason: String)
+  ) extends PriceEvent
+  final case class PriceObservationRetracted(observedAt: Instant, reason: String) extends PriceEvent
 }
 
 /**

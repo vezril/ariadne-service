@@ -94,6 +94,14 @@ object UnitPrice {
     case Dimension.Count => Quantity.unsafe(BigDecimal(1), MeasureUnit.Each)
   }
 
+  /**
+   * Trusted rehydration for the journal. The value was validated before it was ever persisted, so
+   * replay reconstructs rather than re-derives it — re-deriving would silently "fix" history if the
+   * formula ever changed, which is the opposite of what an event store is for.
+   */
+  def rehydrate(amount: BigDecimal, currency: Currency, per: Quantity): UnitPrice =
+    new UnitPrice(amount, currency, per)
+
   /** Derive the unit price of `price` for a pack of `size`. */
   def from(price: Money, size: Quantity): UnitPrice = {
     val ref = reference(size.dimension)

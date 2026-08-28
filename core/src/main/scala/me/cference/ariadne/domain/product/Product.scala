@@ -14,11 +14,13 @@ final case class ResolutionRef(value: String) extends AnyVal
  * hold ProductIds, so a merged id must keep resolving forever (§6.5) — which is why merging writes
  * a redirect rather than removing a row.
  */
-enum ProductStatus {
-  case Provisional
-  case Active
-  case MergedInto(canonical: ProductId)
-  case Deprecated
+sealed trait ProductStatus
+
+object ProductStatus {
+  case object Provisional extends ProductStatus
+  case object Active extends ProductStatus
+  final case class MergedInto(canonical: ProductId) extends ProductStatus
+  case object Deprecated extends ProductStatus
 }
 
 enum ProductState {
@@ -72,8 +74,10 @@ enum ProductCommand {
   case Deprecate(reason: String, correlationId: CorrelationId)
 }
 
-enum ProductEvent {
-  case ProductRegistered(
+sealed trait ProductEvent extends CborSerializable
+
+object ProductEvent {
+  final case class ProductRegistered(
       id: ProductId,
       name: String,
       brand: Option[String],
@@ -82,23 +86,23 @@ enum ProductEvent {
       gtin: Option[Gtin],
       origin: Origin,
       status: ProductStatus
-  )
-  case ProductIdentifierAdded(gtin: Gtin)
-  case ProductAliasAdded(alias: String)
-  case ListingLinked(
+  ) extends ProductEvent
+  final case class ProductIdentifierAdded(gtin: Gtin) extends ProductEvent
+  final case class ProductAliasAdded(alias: String) extends ProductEvent
+  final case class ListingLinked(
       key: ListingKey,
       confidence: Confidence,
       how: MatchMethod,
       matcher: MatcherVersion
-  )
-  case ProductMerged(into: ProductId)
-  case ProductAbsorbed(
+  ) extends ProductEvent
+  final case class ProductMerged(into: ProductId) extends ProductEvent
+  final case class ProductAbsorbed(
       loser: ProductId,
       gtins: Set[Gtin],
       aliases: Set[String],
       listings: Set[ListingKey]
-  )
-  case ProductDeprecated(reason: String)
+  ) extends ProductEvent
+  final case class ProductDeprecated(reason: String) extends ProductEvent
 }
 
 /**
