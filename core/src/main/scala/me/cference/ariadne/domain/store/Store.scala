@@ -15,8 +15,9 @@ enum StoreState {
   case Existing(
       id: StoreId,
       name: String,
-      chain: Option[String],
-      location: Option[String],
+      chain: ChainId,
+      area: Area,
+      label: Option[String],
       active: Boolean
   )
 }
@@ -25,22 +26,23 @@ enum StoreCommand {
   case RegisterStore(
       id: StoreId,
       name: String,
-      chain: Option[String],
-      location: Option[String],
+      chain: ChainId,
+      area: Area,
+      label: Option[String],
       correlationId: CorrelationId
   )
   case UpdateStoreDetails(
       name: Option[String],
-      chain: Option[String],
-      location: Option[String],
+      area: Option[Area],
+      label: Option[String],
       correlationId: CorrelationId
   )
   case DeactivateStore(correlationId: CorrelationId)
 }
 
 enum StoreEvent {
-  case StoreRegistered(id: StoreId, name: String, chain: Option[String], location: Option[String])
-  case StoreDetailsUpdated(name: Option[String], chain: Option[String], location: Option[String])
+  case StoreRegistered(id: StoreId, name: String, chain: ChainId, area: Area, label: Option[String])
+  case StoreDetailsUpdated(name: Option[String], area: Option[Area], label: Option[String])
   case StoreDeactivated
 }
 
@@ -50,7 +52,7 @@ object Store {
     (state, cmd) match {
       case (StoreState.Empty, c: StoreCommand.RegisterStore) =>
         if c.name.isBlank then Left(DomainError.EmptyStoreName)
-        else Right(List(StoreEvent.StoreRegistered(c.id, c.name.trim, c.chain, c.location)))
+        else Right(List(StoreEvent.StoreRegistered(c.id, c.name.trim, c.chain, c.area, c.label)))
 
       case (StoreState.Empty, _) => Left(DomainError.NotRegistered)
       case (_: StoreState.Existing, _: StoreCommand.RegisterStore) =>
@@ -59,11 +61,17 @@ object Store {
       case (s: StoreState.Existing, c: StoreCommand.UpdateStoreDetails) =>
         if c.name.exists(_.isBlank) then Left(DomainError.EmptyStoreName)
         else {
-          val next = StoreEvent.StoreDetailsUpdated(c.name.map(_.trim), c.chain, c.location)
           // No-op when nothing actually changes — avoids a stream of empty deltas.
+          // `chain` is deliberately absent: a franchise does not change banner, and
+          // allowing it would silently re-point every area observation that spoke
+          // for this store.
           val changed =
-            c.name.map(_.trim).exists(_ != s.name) || c.chain != s.chain || c.location != s.location
-          if changed then Right(List(next)) else Right(Nil)
+            c.name.map(_.trim).exists(_ != s.name) ||
+              c.area.exists(_ != s.area) ||
+              (c.label.isDefined && c.label != s.label)
+          if changed then
+            Right(List(StoreEvent.StoreDetailsUpdated(c.name.map(_.trim), c.area, c.label)))
+          else Right(Nil)
         }
 
       case (s: StoreState.Existing, _: StoreCommand.DeactivateStore) =>
@@ -73,7 +81,7 @@ object Store {
   def evolve(state: StoreState, event: StoreEvent): StoreState =
     (state, event) match {
       case (StoreState.Empty, e: StoreEvent.StoreRegistered) =>
-        StoreState.Existing(e.id, e.name, e.chain, e.location, active = true)
+        StoreState.Existing(e.id, e.name, e.chain, e.area, e.label, active = true)
       case (StoreState.Empty, _) => StoreState.Empty
       case (s: StoreState.Existing, e) =>
         e match {
@@ -81,8 +89,8 @@ object Store {
           case e: StoreEvent.StoreDetailsUpdated =>
             s.copy(
               name = e.name.getOrElse(s.name),
-              chain = e.chain.orElse(s.chain),
-              location = e.location.orElse(s.location)
+              area = e.area.getOrElse(s.area),
+              label = e.label.orElse(s.label)
             )
           case StoreEvent.StoreDeactivated => s.copy(active = false)
         }

@@ -177,8 +177,10 @@ validation needs:
   * where it holds." Conflating them would let a precise reading of an imprecise
   * fact look like a precise fact. */
 enum PriceScope:
-  case Exact(storeId: StoreId)              // receipt, manual entry, store-specific promo
-  case Area(chainId: ChainId, area: Area)   // a flyer: this chain, this region, N franchises
+  case Exact(storeId: StoreId)                  // receipt, manual entry, store-specific promo
+  case Regional(chainId: ChainId, area: Area)   // a flyer: this chain, this region, N franchises
+  // `Regional`, not `Area`: a case named `Area` would shadow the `Area` type in its own
+  // parameter list and fail to compile. Implemented as written here.
 
 final case class PriceStreamState(
     productId: ProductId, scope: PriceScope,
@@ -782,7 +784,7 @@ budgeting feed.
 7. ResolutionCase + review queue + REST + `/docs` + Insomnia.
 8. Scraper adapter (Flipp first — port Demeter's ingestion incl. the fetch ledger, rate
    limit/bot-wall handling, and the merchant re-stamp; **raw-archive + replay from day one**;
-   §2.6 + `migration-demeter.md`). Blocked on the shared text-lib decision (§10.5) — stub it
-   behind an interface until the artifact exists.
+   §2.6 + `migration-demeter.md`). The shared text-lib blocker is **cleared** — §10.5 is decided
+   (Ariadne owns it, embedded in `core`), so the normaliser is built in step 3, not stubbed.
 9. Purchase v1 (manual) + the price-append process manager.
 10. Migrations per `migration-demeter.md` / `migration-dionysus.md`.
