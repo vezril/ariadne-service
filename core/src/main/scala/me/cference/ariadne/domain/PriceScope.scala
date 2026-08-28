@@ -17,21 +17,15 @@ package me.cference.ariadne.domain
  * compile — the case would shadow the `Area` type in its own parameter list — so it is `Regional`
  * here, and the doc's snippet says so too.
  */
-enum PriceScope {
-
-  /** A receipt, a manual entry, or a store-specific promo: one store, no inference. */
-  case Exact(storeId: StoreId)
-
-  /** A flyer: this chain, this region, however many franchises that covers. */
-  case Regional(chainId: ChainId, area: Area)
+sealed trait PriceScope {
 
   /**
    * The stream discriminator — one price stream per product x scope. Stable and collision-free,
    * since ids and postal prefixes exclude '|'.
    */
   def key: String = this match {
-    case Exact(storeId) => s"store:${storeId.value}"
-    case Regional(chainId, area) => s"area:${chainId.value}:${area.postalPrefix}"
+    case PriceScope.Exact(storeId) => s"store:${storeId.value}"
+    case PriceScope.Regional(chainId, area) => s"area:${chainId.value}:${area.postalPrefix}"
   }
 
   /**
@@ -39,7 +33,16 @@ enum PriceScope {
    * ones when both cover the same store (§2.3.1).
    */
   def isExact: Boolean = this match {
-    case _: Exact => true
-    case _: Regional => false
+    case _: PriceScope.Exact => true
+    case _: PriceScope.Regional => false
   }
+}
+
+object PriceScope {
+
+  /** A receipt, a manual entry, or a store-specific promo: one store, no inference. */
+  final case class Exact(storeId: StoreId) extends PriceScope
+
+  /** A flyer: this chain, this region, however many franchises that covers. */
+  final case class Regional(chainId: ChainId, area: Area) extends PriceScope
 }

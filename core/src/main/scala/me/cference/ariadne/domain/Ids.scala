@@ -93,10 +93,11 @@ enum MatchMethod {
 }
 
 /** Where a product came from (§2.1). */
-enum Origin {
-  case Manual
-  case Scrape(listing: ListingKey)
-  case Migration(source: String)
+sealed trait Origin
+object Origin {
+  case object Manual extends Origin
+  final case class Scrape(listing: ListingKey) extends Origin
+  final case class Migration(source: String) extends Origin
 }
 
 /**

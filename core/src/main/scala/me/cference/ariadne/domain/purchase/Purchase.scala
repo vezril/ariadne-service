@@ -7,10 +7,12 @@ import java.time.Instant
  * How a purchase got into the catalog (§7). All three paths converge on the same `RecordPurchase`
  * command, so receipt scan and bank import are later ADAPTERS, not later models.
  */
-enum PurchaseSource {
-  case Manual
-  case Receipt(blobId: String)
-  case BankImport(reference: String)
+sealed trait PurchaseSource
+
+object PurchaseSource {
+  case object Manual extends PurchaseSource
+  final case class Receipt(blobId: String) extends PurchaseSource
+  final case class BankImport(reference: String) extends PurchaseSource
 }
 
 final case class PurchaseLine(
@@ -46,16 +48,18 @@ enum PurchaseCommand {
   case VoidPurchase(reason: String, correlationId: CorrelationId)
 }
 
-enum PurchaseEvent {
-  case PurchaseRecorded(
+sealed trait PurchaseEvent extends CborSerializable
+
+object PurchaseEvent {
+  final case class PurchaseRecorded(
       id: PurchaseId,
       storeId: StoreId,
       purchasedAt: Instant,
       lines: List[PurchaseLine],
       total: Money,
       source: PurchaseSource
-  )
-  case PurchaseVoided(reason: String)
+  ) extends PurchaseEvent
+  final case class PurchaseVoided(reason: String) extends PurchaseEvent
 }
 
 /**
