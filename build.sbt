@@ -42,6 +42,7 @@ ThisBuild / scalacOptions ++= Seq(
 lazy val pekkoVersion = "1.2.0"
 lazy val pekkoHttpVersion = "1.2.0"
 lazy val scalaTestVersion = "3.2.19"
+lazy val scalaCheckPlusVersion = "3.2.19.0"
 lazy val logbackVersion = "1.5.16"
 lazy val logstashEncoderVersion = "8.0"
 
@@ -57,7 +58,13 @@ lazy val root = (project in file("."))
 lazy val core = (project in file("core"))
   .settings(
     name := "ariadne-core",
-    libraryDependencies += "org.scalatest" %% "scalatest" % scalaTestVersion % Test
+    libraryDependencies ++= Seq(
+      "org.scalatest" %% "scalatest" % scalaTestVersion % Test,
+      // Property tests for the matching algebra: DESIGN §11 step 3 asks for them by
+      // name, because the normaliser and scorer have invariants (idempotence,
+      // symmetry, a bounded score) that examples cannot cover exhaustively.
+      "org.scalatestplus" %% "scalacheck-1-18" % scalaCheckPlusVersion % Test
+    )
   )
 
 // --- server: Pekko runtime + Main + Docker image. ----------------------------
