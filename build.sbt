@@ -89,6 +89,10 @@ lazy val server = (project in file("server"))
       // Structured JSON logs (the constellation log schema — see the add-structured-logging spec).
       "net.logstash.logback" % "logstash-logback-encoder" % logstashEncoderVersion,
       // --- persistence + read-side projections (DESIGN §2, §3) ---
+      // ShardedDaemonProcess distributes the projection instances; on this
+      // single-node cluster it still provides the supervised, restart-safe runner.
+      "org.apache.pekko" %% "pekko-cluster-typed" % pekkoVersion,
+      "org.apache.pekko" %% "pekko-cluster-sharding-typed" % pekkoVersion,
       "org.apache.pekko" %% "pekko-persistence-typed" % pekkoVersion,
       "org.apache.pekko" %% "pekko-serialization-jackson" % pekkoVersion,
       "org.apache.pekko" %% "pekko-persistence-r2dbc" % pekkoR2dbcVersion,
@@ -98,6 +102,10 @@ lazy val server = (project in file("server"))
       "org.apache.pekko" %% "pekko-projection-eventsourced" % pekkoProjectionVersion,
       "org.apache.pekko" %% "pekko-actor-testkit-typed" % pekkoVersion % Test,
       "org.apache.pekko" %% "pekko-persistence-testkit" % pekkoVersion % Test,
+      "org.apache.pekko" %% "pekko-projection-testkit" % pekkoProjectionVersion % Test,
+      // pekko-projection-testkit 1.1.x pulls pekko-stream-testkit 1.1.3; Pekko forbids a
+      // mixed-version classpath, so pin it to pekkoVersion explicitly.
+      "org.apache.pekko" %% "pekko-stream-testkit" % pekkoVersion % Test,
       "org.apache.pekko" %% "pekko-http-testkit" % pekkoHttpVersion % Test,
       "org.scalatest" %% "scalatest" % scalaTestVersion % Test,
       // Real Postgres for projection tests — a mocked journal would prove nothing
