@@ -123,37 +123,72 @@ first, repair explicitly).
 an unmatched listing), `Migration(source)` (Demeter/Dionysus backfill). Provisional products come
 from `Scrape` and surface in the review queue (§6.5).
 
-### 2.2 Store
+### 2.2 Store — the individual franchise
 
-Small reference aggregate — a retailer/banner + optional location.
+**REVISED 2026-08-28** (Calvin, via the dionysus-planner session — resolves the §10.3 open
+question). The v1 answer was "chain-level with optional location, revisit when it hurts." It
+hurts, and here is the requirement that broke it:
+
+> IGA is a chain with many stores. IGA might run a sale on X chain-wide, but a *specific
+> franchise* might run a sale on Y that no other IGA has.
+
+So **the anchor inverts: a `Store` IS an individual franchise**, and `chain` becomes the grouping
+attribute you roll up by. "Is IGA running this?" stops being a row and becomes a query across a
+chain's stores. Explicitly **out of scope**: opening hours, addresses, geo, and the rest of the
+store-logistics dimension — Calvin does not want them and they are not market facts.
 
 ```scala
-final case class StoreId(value: String)
-final case class StoreState(id: StoreId, name: String, chain: Option[String],
-                            location: Option[String], active: Boolean)
+final case class StoreId(value: String)   // an individual franchise
+final case class ChainId(value: String)   // the banner: IGA, Metro, Provigo
+final case class Area(postalPrefix: String)  // the flyer-coverage region (FSA-shaped)
+
+final case class StoreState(id: StoreId, name: String, chain: ChainId,
+                            area: Area, label: Option[String], active: Boolean)
 
 enum StoreCommand: case RegisterStore(...); case UpdateStoreDetails(...); case DeactivateStore(...)
 enum StoreEvent:   case StoreRegistered(...); case StoreDetailsUpdated(...); case StoreDeactivated(...)
 ```
 
-Nothing clever here on purpose. Stores are also where scraper source config attaches
-(which Flipp merchant / site maps to which StoreId) — config, not domain state.
+`chain` moves from `Option[String]` to a required `ChainId` — it is now load-bearing (it is the
+rollup axis and half of an area observation's identity), not a decorative label. `area` is what
+lets a chain-and-region flyer fact be matched to the franchises it actually covers (§2.3.1).
+
+The seed set is small — Calvin shops a handful of stores — so each is registered as
+`(chain, label, area)` by hand. Scraper source config still attaches here (which Flipp merchant
+maps to which `ChainId`, which postal codes to poll) — config, not domain state.
+
+**Honest limitation, stated up front:** this change does **not** let scraping see
+franchise-specific sales. The flyer feed cannot express them (§2.3.1). What it buys is a truthful
+model of what we know and a well-typed home for receipt-exact facts — which is what finally gives
+Purchase a job beyond bookkeeping.
+
 
 ### 2.3 PriceObservation — an append-only stream
 
-**This aggregate IS its event stream.** Entity id = `price|{productId}|{storeId}` (one stream per
-product×store pair — keeps entities small, recovery fast, and the natural query axis aligned with
-the stream). State is only what validation needs:
+**This aggregate IS its event stream.** **REVISED 2026-08-28:** the entity id is
+`price|{productId}|{scope}` where scope is `store:{storeId}` or `area:{chainId}:{area}` — see
+§2.3.1 for why it is no longer keyed on `storeId` alone. One stream per product×scope pair keeps
+entities small, recovery fast, and the query axis aligned with the stream. State is only what
+validation needs:
 
 ```scala
+/** How precisely this price fact is scoped. NOT a confidence — a confidence says
+  * "we might have misread it"; a scope says "here is exactly what we observed and
+  * where it holds." Conflating them would let a precise reading of an imprecise
+  * fact look like a precise fact. */
+enum PriceScope:
+  case Exact(storeId: StoreId)              // receipt, manual entry, store-specific promo
+  case Area(chainId: ChainId, area: Area)   // a flyer: this chain, this region, N franchises
+
 final case class PriceStreamState(
-    productId: ProductId, storeId: StoreId,
-    lastObserved: Option[(Instant, Money)],   // dedup window
+    productId: ProductId, scope: PriceScope,
+    lastObserved: Option[(Instant, Money, PriceSource)],   // dedup window
     count: Long
 )
 
 enum PriceCommand:
   case ObservePrice(price: Money, observedAt: Instant, source: PriceSource,
+                    scope: PriceScope,             // NEW — record what we actually saw
                     unitPrice: Option[UnitPrice],  // normalized $/100g, $/L … computed upstream
                     promo: Option[PromoFlag],      // was-this-a-sale FACT (not a judgment)
                     priceConfidence: Confidence,   // fact-extraction certainty (price-text/multi-buy/% parsing)
@@ -161,7 +196,7 @@ enum PriceCommand:
                     correlationId: CorrelationId)
 
 enum PriceEvent:
-  case PriceObserved(productId: ProductId, storeId: StoreId, price: Money,
+  case PriceObserved(productId: ProductId, scope: PriceScope, price: Money,
                      unitPrice: Option[UnitPrice], promo: Option[PromoFlag],
                      priceConfidence: Confidence, sizeConfidence: Confidence,
                      observedAt: Instant, source: PriceSource)   // → Hermes product.price.observed
@@ -172,6 +207,42 @@ enum PriceSource:
   case Manual                      // Calvin typed it
   case Backfill(origin: String)    // migration replay (carries ORIGINAL observedAt)
 ```
+
+### 2.3.1 Observation scope — exact vs area (NEW, 2026-08-28)
+
+**The flyer feed cannot express a franchise.** Verified in Demeter's ingestion code, not assumed:
+`FlippDecoders.decodeFlyer` builds every `Flyer` from `merchant_id` + the *queried* `postal_code`
++ locale (`FlippDecoders.scala:99-118`), and every Flipp endpoint is scoped
+`?locale=…&postal_code=…` (`FlippSource.scala:28-35`). There is no store, branch, or franchise
+identifier anywhere in the feed.
+
+So a flyer price is a **(chain, region) fact covering a SET of franchises** — not a store fact.
+With §2.2's franchise-anchored Store, writing one flyer observation as N per-store
+`PriceObserved` events would **fabricate N facts from one observation**. That is precisely the
+inference the facts-only charter pushes downstream to Demeter, so Ariadne must not do it.
+
+**The rule: record the fact as observed; fan out at READ time.**
+
+- Write side stores exactly one event, scoped `Area(chain, region)` for a flyer or
+  `Exact(storeId)` for a receipt / manual entry / store-specific promo.
+- Read side answers "what does product P cost at store S" by preferring the most recent **Exact**
+  observation for S, falling back to the most recent **Area** observation whose `(chain, area)`
+  covers S (§3).
+- The response says which it was. A caller must be able to tell "this is the price your receipt
+  showed" from "this is what the chain's flyer advertises in your region."
+
+**The cost, named rather than hidden:** read-time fan-out needs a store→area coverage mapping —
+which franchises an area observation actually speaks for. That is real data with real staleness,
+seeded from §2.2's `(chain, label, area)` registrations. It is cheap here only because the seed
+set is a handful of stores; it would not be free at scale.
+
+**What this does NOT buy.** It does not make scraping see franchise-specific sales — those are
+invisible to Flipp and are learned only from a receipt or in store. Nor does it much improve
+Demeter's best-price-across-stores alerting (§10.7's option (b)) on flyer data alone: every
+franchise of a chain in a region shares one flyer, so the prices are *identical* and there is
+nothing to choose between. Option (b) pays off across **chains**, which chain-level stores
+already provided, and across franchises only where receipts fill in. Claiming otherwise would
+oversell this change.
 
 **The two confidences are facts and part of the contract, not decoration** (Demeter review,
 2026-08-26). Demeter's pipeline established — and its corpus carries — both a `price_confidence`
@@ -329,11 +400,12 @@ schema-evolution story for read models). Offsets in the standard projection offs
 | Projection | Source streams | Tables (sketch) | Serves |
 |---|---|---|---|
 | **product-catalog** | Product, Store | `products(id, name, brand, category, size, status, merged_into)` · `product_gtins(gtin→product_id)` · `product_aliases` · `product_listings(store_id, external_id → product_id)` · `stores` | GetProduct / ListProducts / SearchProducts; redirect-following for merged ids |
-| **price-history** | PriceObservation | `price_history(product_id, store_id, observed_at, price, unit_price, promo, price_confidence, size_confidence, source, correlation_id)` — the shared read model from the EventStorming wall | GetPriceHistory (product × store × time) — incl. **demeter-insight**'s history endpoint + price chart (§4) |
-| **current-price** | PriceObservation | `current_price(product_id, store_id, price, unit_price, observed_at, source)` — one row per pair, last-write-wins by `observedAt` | GetCurrentPrice (the shopping-list NOW call) |
+| **price-history** | PriceObservation | `price_history(product_id, scope_kind, store_id?, chain_id?, area?, observed_at, price, unit_price, promo, price_confidence, size_confidence, source, correlation_id)` — the shared read model from the EventStorming wall. **Scope columns are nullable by kind** (§2.3.1): an `exact` row carries `store_id`, an `area` row carries `chain_id`+`area`. Queries for a store UNION its exact rows with the area rows covering it | GetPriceHistory (product × store × time) — incl. **demeter-insight**'s history endpoint + price chart (§4) |
+| **current-price** | PriceObservation | `current_price(product_id, store_id, price, unit_price, observed_at, source, scope_kind)` — one row per product×**store**, resolved at projection time: the most recent `exact` observation for that store, else the most recent `area` observation covering it (§2.3.1). `scope_kind` is carried through so the caller can tell a receipt price from a regional flyer claim | GetCurrentPrice (the shopping-list NOW call) |
 | **purchase-history** | Purchase | `purchases`, `purchase_lines` | ListPurchases; future budgeting queries |
 | **resolver/match index** | Product | `match_index(product_id, normalized_name, name_tokens, trigrams tsvector/pg_trgm, brand_norm, size_class)` + the gtin + listing tables above; rows record the normalizer/matcher version they were built with (§6.6) | ResolveProduct scoring (§6.4); the GTIN-uniqueness guard |
 | **review-queue** | ResolutionCase | `resolution_cases(id, state, subject, candidates_json, created_at)` | ariadne-ui review screens |
+| **store-coverage** | Store | `store_coverage(store_id, chain_id, area)` — which franchises an `Area(chain, area)` observation speaks for | the read-time fan-out of §2.3.1; rebuilt from the Store journal like everything else |
 | **hermes-publisher** | Product, PriceObservation, Purchase | (offset only) | §5 — the outbox projection |
 | **price-append process manager** | Purchase | (offset only) | issues `ObservePrice(source=Purchase)` per line (§2.4) |
 
@@ -359,8 +431,10 @@ service AriadneCatalog {
   rpc ResolveProduct    (ResolveProductRequest)    returns (ResolveProductResponse);  // THE resolver (§6): gtin and/or name/brand/size in →
                                                                                       // Matched{id, confidence} | Ambiguous{candidates} | NoMatch
   // Prices
-  rpc GetCurrentPrice   (GetCurrentPriceRequest)   returns (GetCurrentPriceResponse); // product_id (+optional store_id) → best/current per store
-  rpc GetPriceHistory   (GetPriceHistoryRequest)   returns (stream PricePoint);       // product × optional store × time range; server-streamed
+  rpc GetCurrentPrice   (GetCurrentPriceRequest)   returns (GetCurrentPriceResponse); // product_id (+optional store_id) → current per store, exact-over-area (§2.3.1);
+                                                                                      // response states scope so a receipt price is distinguishable from a flyer claim
+  rpc GetPriceHistory   (GetPriceHistoryRequest)   returns (stream PricePoint);       // product × optional store × time range; server-streamed.
+                                                                                      // PricePoint carries scope (exact|area) — §2.3.1
   // Purchases
   rpc ListPurchases     (ListPurchasesRequest)     returns (ListPurchasesResponse);   // time range, paged
   // Writes that a caller awaits (thin command surface)
@@ -402,7 +476,7 @@ Prometheus `/metrics` with Hera scrape annotations round out the HTTP server.
 | Topic | Domain event | Payload (Lexicon schema, PROPOSAL) | Subscribers |
 |---|---|---|---|
 | `product.registered` | `ProductRegistered` (and `ProductMerged` tombstones — see below) | product id, name, brand, size, gtin?, status, origin, `correlationId` | **Demeter** (optional: refresh watchable-product cache) · **Dionysus** (optional: new-product awareness for ingredient linking); both may ignore it in v1 |
-| `product.price.observed` | `PriceObserved` | product id, store id, price, unit price, promo?, **price_confidence, size_confidence** (§2.3 — size ambiguity must reach Demeter's match confidence), observed_at, source, `correlationId` | **Demeter** (REQUIRED — the deal-evaluation policy: *whenever PriceObserved on a watched product then evaluate*) |
+| `product.price.observed` | `PriceObserved` | product id, **scope (`exact{store_id}` \| `area{chain_id, area}` — §2.3.1)**, price, unit price, promo?, **price_confidence, size_confidence** (§2.3 — size ambiguity must reach Demeter's match confidence), observed_at, source, `correlationId` | **Demeter** (REQUIRED — the deal-evaluation policy: *whenever PriceObserved on a watched product then evaluate*). **Scope is required for correct alerting:** an area price speaks for every franchise of that chain in the region, so treating it as one store's price would under-count coverage, and treating it as N store prices would fabricate N facts |
 | `purchase.recorded` | `PurchaseRecorded` | purchase id, store id, purchased_at, lines[], total, source, `correlationId` | none in v1 · **future budgeting (Plutus)** · Dionysus MAY subscribe later for pantry restock |
 
 Topic names live in Ariadne's chart/config (env-overridable, the Artemis idiom); the service
@@ -626,8 +700,14 @@ budgeting feed.
    decide with the Lexicon session when the first consumer needs merges.
 2. Fuzzy thresholds (0.60/0.92) are guesses — tune against real Flipp data during the Demeter
    backfill (the backfill doubles as the matcher's test corpus).
-3. Store granularity: chain vs individual location (prices differ by location for some chains).
-   v1: chain-level with optional location; revisit when it hurts.
+3. **Store granularity — RESOLVED 2026-08-28 (Calvin, relayed via dionysus-planner): the
+   individual franchise is the Store; `chain` becomes the rollup attribute.** The v1 answer
+   (chain-level with optional location) broke on a real requirement — a single IGA franchise can
+   run a sale no other IGA has. Revised model in §2.2; the consequence for price facts, which is
+   the larger half of the change, is §2.3.1: the flyer feed cannot express a franchise, so a
+   scraped price is an `Area(chain, region)` fact and fanning it onto member stores at write time
+   would fabricate precision. Recorded as observed, fanned out at read time. Store logistics
+   (hours, addresses, geo) remain explicitly out of scope.
 4. Receipt-OCR worker placement (Argus-style worker vs in-service) — v2 question.
 5. **Shared text-normalization artifact — DECIDED by Calvin, 2026-08-26: Ariadne owns it,
    embedded, extraction deferred.** `TextNormalizer` + `BilingualSplitter` must be consumed by
@@ -671,7 +751,9 @@ budgeting feed.
    G3 in `migration-demeter.md` is a **pre-cutover** gate, not a pre-build one: this decision
    unblocks building `core` now, and Demeter consumes the published artifact only when the
    migration actually runs.
-6. **Lexicon contract additions** from the Demeter review: `price_confidence` + `size_confidence`
+6. **Lexicon contract additions** — now THREE, and they should be proposed together in one
+   pass rather than as successive amendments: the observation **scope** field (§2.3.1) alongside
+   the Demeter review's `price_confidence` + `size_confidence`
    on `PriceObserved`/`PricePoint` (§2.3 — the size-ambiguity coupling is contract-required), and
    whether `matcher_version` should be surfaced on resolution responses. Propose with the rest of
    `ariadne.v1`.
@@ -688,9 +770,13 @@ budgeting feed.
 ## 11. Build order (suggested)
 
 1. Seed repo per `new-scala-pekko-service` (core/server split), pg-service wiring, health/metrics.
-2. `core`: value types + the four fact aggregates' decide/evolve + tests.
+2. `core`: value types + the four fact aggregates' decide/evolve + tests. **Built 2026-08-26
+   against the pre-revision model; the §2.2/§2.3.1 change lands on top** — `Store` gains
+   `ChainId`/`Area`, `PriceObservation` swaps `storeId` for `PriceScope`. Cheap now (no
+   persistence, no projections, no contract yet); a migration once step 4 or 5 exists.
 3. `core`: normalizer + scorer (§6.3) + property tests — the hard part, do it early.
-4. `server`: persistence entities + product-catalog/price-history/current-price projections.
+4. `server`: persistence entities + product-catalog/price-history/current-price/**store-coverage**
+   projections (the last one backs §2.3.1's read-time fan-out).
 5. gRPC surface (stub the Lexicon contract locally while the proposal is reviewed).
 6. Hermes publisher projection + topic self-provisioning (client pinned @v1.13.0).
 7. ResolutionCase + review queue + REST + `/docs` + Insomnia.
