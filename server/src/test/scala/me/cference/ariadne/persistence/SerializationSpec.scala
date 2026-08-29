@@ -6,6 +6,12 @@ import me.cference.ariadne.domain.price.{PriceEvent, PriceSource}
 import me.cference.ariadne.domain.product.{ProductEvent, ProductStatus}
 import me.cference.ariadne.domain.purchase.{PurchaseEvent, PurchaseLine, PurchaseSource}
 import me.cference.ariadne.domain.store.StoreEvent
+import me.cference.ariadne.domain.resolution.{
+  MatchSubject,
+  ParkedObservation,
+  ResolutionEvent,
+  ScoredCandidate
+}
 import org.apache.pekko.actor.testkit.typed.scaladsl.ScalaTestWithActorTestKit
 import org.apache.pekko.serialization.{SerializationExtension, Serializers}
 import org.scalatest.matchers.should.Matchers
@@ -174,6 +180,39 @@ final class SerializationSpec
         )
         roundTrip(e).source shouldBe src
       }
+    }
+  }
+
+  "resolution events" should {
+
+    "round-trip a proposal with its subject and scored candidates" in {
+      val e = ResolutionEvent.ResolutionProposed(
+        me.cference.ariadne.domain.resolution.ResolutionId("r-1"),
+        MatchSubject("Lactantia Butter 454 g", Some("Lactantia"), Some(gtin), Some(listing)),
+        List(
+          ScoredCandidate(ProductId("p-a"), Confidence.unsafe(0.81), List("size conflict")),
+          ScoredCandidate(ProductId("p-b"), Confidence.unsafe(0.74), Nil)
+        )
+      )
+      roundTrip(e) shouldBe e
+    }
+
+    "round-trip a confirmation carrying released parked observations" in {
+      // The richest payload in the journal: a nested PriceScope inside a list inside
+      // an event. If the released observations did not survive replay, confirming a
+      // case would silently drop real market facts.
+      val parked = ParkedObservation(
+        money,
+        Instant.parse("2026-08-26T12:00:00Z"),
+        PriceScope.Regional(ChainId("iga"), Area("H2X")),
+        Confidence.Certain,
+        Confidence.unsafe(0.4)
+      )
+      val e = ResolutionEvent.ResolutionConfirmed(ProductId("p-a"), List(parked, parked))
+      val back = roundTrip(e)
+      back shouldBe e
+      back.released should have size 2
+      back.released.head.scope shouldBe PriceScope.Regional(ChainId("iga"), Area("H2X"))
     }
   }
 

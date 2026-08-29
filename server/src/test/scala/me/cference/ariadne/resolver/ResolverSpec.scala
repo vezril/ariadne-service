@@ -3,6 +3,7 @@ package me.cference.ariadne.resolver
 import io.r2dbc.postgresql.{PostgresqlConnectionConfiguration, PostgresqlConnectionFactory}
 import me.cference.ariadne.domain.*
 import me.cference.ariadne.domain.product.{ProductEvent, ProductStatus}
+import me.cference.ariadne.domain.resolution.MatchSubject
 import me.cference.ariadne.projection.{PostgresFixture, ProjectionHandlers, ReadModelRepository}
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.concurrent.ScalaFutures
@@ -94,7 +95,11 @@ final class ResolverSpec
           MatchSubject("something entirely different", gtin = Some(Gtin.unsafe("4006381333931")))
         )
         .futureValue
-      out shouldBe ResolutionOutcome.Matched("lac-454", Confidence.Certain, MatchMethod.Gtin)
+      out shouldBe ResolutionOutcome.Matched(
+        ProductId("lac-454"),
+        Confidence.Certain,
+        MatchMethod.Gtin
+      )
     }
 
     "short-circuit on a known listing key, which is what makes steady state cheap" in {
@@ -105,7 +110,11 @@ final class ResolverSpec
           MatchSubject("noise", listing = Some(ListingKey(StoreId("s-1"), "ext-1")))
         )
         .futureValue
-      out shouldBe ResolutionOutcome.Matched("gay-454", Confidence.Certain, MatchMethod.Listing)
+      out shouldBe ResolutionOutcome.Matched(
+        ProductId("gay-454"),
+        Confidence.Certain,
+        MatchMethod.Listing
+      )
     }
 
     "answer with the CANONICAL id when the strong key points at a tombstone" in {
@@ -123,7 +132,11 @@ final class ResolverSpec
 
       val out =
         resolver.resolve(MatchSubject("x", gtin = Some(Gtin.unsafe("96385074")))).futureValue
-      out shouldBe ResolutionOutcome.Matched("lac-454", Confidence.Certain, MatchMethod.Gtin)
+      out shouldBe ResolutionOutcome.Matched(
+        ProductId("lac-454"),
+        Confidence.Certain,
+        MatchMethod.Gtin
+      )
     }
   }
 
@@ -135,7 +148,7 @@ final class ResolverSpec
         .futureValue
       out match {
         case ResolutionOutcome.Matched(id, c, m) =>
-          id shouldBe "lac-454"
+          id shouldBe ProductId("lac-454")
           m shouldBe MatchMethod.Fuzzy
           c.toDouble should be >= 0.92
         case other => fail(s"expected an auto-link, got $other")
@@ -149,7 +162,7 @@ final class ResolverSpec
         .resolve(MatchSubject("Lactantia Salted Butter 250 g", Some("Lactantia")))
         .futureValue
       out match {
-        case ResolutionOutcome.Matched(id, _, _) => id shouldBe "lac-250"
+        case ResolutionOutcome.Matched(id, _, _) => id shouldBe ProductId("lac-250")
         case other => fail(s"expected the 250 g, got $other")
       }
     }
@@ -159,7 +172,7 @@ final class ResolverSpec
       val out =
         resolver.resolve(MatchSubject("Gay Lea Salted Butter 454 g", Some("Gay Lea"))).futureValue
       out match {
-        case ResolutionOutcome.Matched(id, _, _) => id shouldBe "gay-454"
+        case ResolutionOutcome.Matched(id, _, _) => id shouldBe ProductId("gay-454")
         case other => fail(s"expected the Gay Lea product, got $other")
       }
     }
@@ -169,8 +182,9 @@ final class ResolverSpec
       // that is no longer a distinct thing.
       val out = resolver.resolve(MatchSubject("Duplicate Butter", Some("Lactantia"))).futureValue
       out match {
-        case ResolutionOutcome.Matched(id, _, _) => id should not be "dup-1"
-        case ResolutionOutcome.Ambiguous(cs) => cs.map(_.productId) should not contain "dup-1"
+        case ResolutionOutcome.Matched(id, _, _) => id should not be ProductId("dup-1")
+        case ResolutionOutcome.Ambiguous(cs) =>
+          cs.map(_.productId) should not contain ProductId("dup-1")
         case ResolutionOutcome.NoMatch => succeed
       }
     }

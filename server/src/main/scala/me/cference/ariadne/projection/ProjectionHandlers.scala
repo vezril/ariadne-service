@@ -4,6 +4,7 @@ import me.cference.ariadne.domain.*
 import me.cference.ariadne.domain.price.{PriceEvent, PriceSource}
 import me.cference.ariadne.domain.product.{ProductEvent, ProductStatus}
 import me.cference.ariadne.domain.store.StoreEvent
+import me.cference.ariadne.domain.resolution.{ResolutionEvent, ScoredCandidate}
 import me.cference.ariadne.matching.MatchInput
 import me.cference.ariadne.projection.ReadModelRepository.{CurrentPriceRow, PriceHistoryRow}
 
@@ -149,6 +150,62 @@ object ProjectionHandlers {
       // append-only store exists to prevent.
       case _: PriceEvent.PriceObservationRetracted => Future.unit
     }
+
+  /**
+   * ResolutionCase -> the review queue (§6.5). This is the read model ariadne-ui exists to show.
+   *
+   * Candidates are stored as the matcher offered them, JSON-encoded by hand rather than through a
+   * library: the payload is three fields and pulling in a JSON dependency for it would be heavier
+   * than the problem. What matters is that the review UI shows what the matcher said AT THE TIME,
+   * not a re-derivation from a matcher that may since have changed (§6.6).
+   */
+  def resolution(repo: ReadModelRepository)(persistenceId: String, event: ResolutionEvent)(using
+      ec: ExecutionContext
+  ): Future[Unit] = {
+    val id = entityId(persistenceId)
+    event match {
+      case e: ResolutionEvent.ResolutionProposed =>
+        repo.upsertResolutionCase(
+          id,
+          e.subject.name,
+          e.subject.brand,
+          e.subject.gtin.map(_.value),
+          e.subject.listing.map(_.storeId.value),
+          e.subject.listing.map(_.externalId),
+          candidatesJson(e.candidates)
+        )
+      case _: ResolutionEvent.ObservationParked => repo.incrementParked(id)
+      case e: ResolutionEvent.ResolutionConfirmed =>
+        repo.resolveCase(id, s"Confirmed:${e.productId.value}")
+      case e: ResolutionEvent.ResolutionRejected =>
+        repo.resolveCase(id, s"NewProduct:${e.newProductId.value}")
+      case e: ResolutionEvent.MergeRequested =>
+        repo.resolveCase(id, s"Merged:${e.winner.value}<-${e.loser.value}")
+      case e: ResolutionEvent.SplitRequested =>
+        repo.resolveCase(id, s"Split:${e.newProductId.value}")
+    }
+  }
+
+  private def candidatesJson(candidates: List[ScoredCandidate]): String =
+    candidates
+      .map(c =>
+        s"""{"productId":${quote(c.productId.value)},"score":${c.score.toDouble},"notes":[${c.notes
+            .map(quote)
+            .mkString(",")}]}"""
+      )
+      .mkString("[", ",", "]")
+
+  /** Minimal JSON string escaping — enough for ids, scores and the scorer's fixed notes. */
+  private def quote(s: String): String =
+    "\"" + s.flatMap {
+      case '"' => "\\\""
+      case '\\' => "\\\\"
+      case '\n' => "\\n"
+      case '\r' => "\\r"
+      case '\t' => "\\t"
+      case c if c < ' ' => f"\\u${c.toInt}%04x"
+      case c => c.toString
+    } + "\""
 
   /** The index stores the name AFTER normalisation, with the size split out (§6.3). */
   private def indexFor(

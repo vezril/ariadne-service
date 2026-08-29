@@ -352,6 +352,52 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
         )
     )(normalizedName, Integer.valueOf(limit), java.lang.Double.valueOf(floor))
 
+  // ----------------------------------------------------------- review queue
+
+  def upsertResolutionCase(
+      id: String,
+      subjectName: String,
+      subjectBrand: Option[String],
+      subjectGtin: Option[String],
+      subjectStore: Option[String],
+      subjectListing: Option[String],
+      candidatesJson: String
+  ): Future[Unit] =
+    exec(
+      """INSERT INTO resolution_cases
+         (id, state, subject_name, subject_brand, subject_gtin, subject_store, subject_listing, candidates)
+         VALUES ($1, 'pending', $2, $3, $4, $5, $6, $7::jsonb)
+         ON CONFLICT (id) DO UPDATE SET
+           subject_name = EXCLUDED.subject_name, subject_brand = EXCLUDED.subject_brand,
+           subject_gtin = EXCLUDED.subject_gtin, subject_store = EXCLUDED.subject_store,
+           subject_listing = EXCLUDED.subject_listing, candidates = EXCLUDED.candidates""",
+      id,
+      subjectName,
+      subjectBrand.orNull,
+      subjectGtin.orNull,
+      subjectStore.orNull,
+      subjectListing.orNull,
+      candidatesJson
+    )
+
+  def incrementParked(id: String): Future[Unit] =
+    exec("UPDATE resolution_cases SET parked_count = parked_count + 1 WHERE id = $1", id)
+
+  /** Terminal. `decided_at` is set once and never cleared — a decided case leaves the queue. */
+  def resolveCase(id: String, outcome: String): Future[Unit] =
+    exec(
+      "UPDATE resolution_cases SET state = 'resolved', outcome = $2, decided_at = now() WHERE id = $1",
+      id,
+      outcome
+    )
+
+  def pendingCaseCount(): Future[Long] =
+    query(
+      "SELECT count(*) FROM resolution_cases WHERE state = 'pending'",
+      r => r.get(0, classOf[java.lang.Long])
+    )()
+      .map(_.headOption.map(_.longValue).getOrElse(0L))
+
   // ------------------------------------------------------------------ plumbing
 
   private def exec(sql: String, args: Any*): Future[Unit] =

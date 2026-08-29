@@ -31,5 +31,11 @@ enum DomainError(val message: String) {
   case EmptyPurchase extends DomainError("a purchase must have at least one line")
   case PurchaseTotalMismatch(stated: String, computed: String)
       extends DomainError(s"stated total $stated does not match the sum of lines $computed")
+  case AlreadyResolved
+      extends DomainError("this resolution case is already decided; a change of mind is a new case")
+  case NotACandidate(productId: ProductId)
+      extends DomainError(
+        s"${productId.value} was not among the offered candidates; use Reject to create a different product"
+      )
   case AlreadyVoided extends DomainError("purchase is already voided")
 }
