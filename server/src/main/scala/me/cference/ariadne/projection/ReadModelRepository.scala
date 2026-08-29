@@ -273,6 +273,85 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
         )
     )(productId, storeId).map(_.headOption)
 
+  // ----------------------------------------------------------- match index
+
+  def upsertMatchIndex(
+      productId: String,
+      normalizedName: String,
+      tokens: List[String],
+      brandNorm: Option[String],
+      size: Option[Quantity]
+  ): Future[Unit] =
+    exec(
+      """INSERT INTO match_index
+         (product_id, normalized_name, name_tokens, brand_norm, size_amount, size_unit, size_dimension)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (product_id) DO UPDATE SET
+           normalized_name = EXCLUDED.normalized_name, name_tokens = EXCLUDED.name_tokens,
+           brand_norm = EXCLUDED.brand_norm, size_amount = EXCLUDED.size_amount,
+           size_unit = EXCLUDED.size_unit, size_dimension = EXCLUDED.size_dimension""",
+      productId,
+      normalizedName,
+      tokens.toArray,
+      brandNorm.orNull,
+      size.map(_.amount.bigDecimal).orNull,
+      size.map(_.unit.toString).orNull,
+      size.map(_.dimension.toString).orNull
+    )
+
+  def deleteMatchIndex(productId: String): Future[Unit] =
+    exec("DELETE FROM match_index WHERE product_id = $1", productId)
+
+  /** The strong key (§6.1). A hit here is identity, not a guess. */
+  def findProductByGtin(gtin: String): Future[Option[String]] =
+    query("SELECT product_id FROM product_gtins WHERE gtin = $1", r => r.get(0, classOf[String]))(
+      gtin
+    )
+      .map(_.headOption)
+
+  /** The second strong key (§6.2): a listing already resolved short-circuits the matcher. */
+  def findProductByListing(storeId: String, externalId: String): Future[Option[String]] =
+    query(
+      "SELECT product_id FROM product_listings WHERE store_id = $1 AND external_id = $2",
+      r => r.get(0, classOf[String])
+    )(storeId, externalId).map(_.headOption)
+
+  /**
+   * Trigram top-K.
+   *
+   * RETRIEVAL ONLY — this narrows the catalogue, it does not decide. The exact score is recomputed
+   * by the pure scorer on the shortlist, because pg_trgm's similarity and the scorer's blend
+   * disagree by construction and the number recorded on a link must be the one the domain computed,
+   * not the one the index guessed (§6.3).
+   *
+   * `similarity` rather than the `%` operator so the floor is explicit here instead of depending on
+   * a session-level `pg_trgm.similarity_threshold` that a migration could silently change.
+   */
+  def trigramCandidates(
+      normalizedName: String,
+      limit: Int,
+      floor: Double = 0.15
+  ): Future[List[MatchCandidateRow]] =
+    query(
+      """SELECT mi.product_id, mi.normalized_name, mi.brand_norm, mi.size_amount, mi.size_unit
+         FROM match_index mi
+         JOIN products p ON p.id = mi.product_id
+         -- A tombstone is not a candidate: it forwards, so matching onto it would
+         -- re-link a listing to a product that no longer exists as a distinct thing.
+         WHERE p.merged_into IS NULL
+           AND similarity(mi.normalized_name, $1) >= $3
+         ORDER BY similarity(mi.normalized_name, $1) DESC
+         LIMIT $2""",
+      r =>
+        MatchCandidateRow(
+          r.get(0, classOf[String]),
+          r.get(1, classOf[String]),
+          Option(r.get(2, classOf[String])),
+          Option(r.get(3, classOf[java.math.BigDecimal])).map(BigDecimal(_)),
+          Option(r.get(4, classOf[String]))
+        )
+    )(normalizedName, Integer.valueOf(limit), java.lang.Double.valueOf(floor))
+
   // ------------------------------------------------------------------ plumbing
 
   private def exec(sql: String, args: Any*): Future[Unit] =
@@ -370,6 +449,15 @@ object ReadModelRepository {
       observedAt: Instant,
       source: String,
       sizeConfidence: Double
+  )
+
+  /** One shortlist entry, as stored — the scorer re-derives everything else. */
+  final case class MatchCandidateRow(
+      productId: String,
+      normalizedName: String,
+      brandNorm: Option[String],
+      sizeAmount: Option[BigDecimal],
+      sizeUnit: Option[String]
   )
 
   /** A price with its provenance — a caller must be able to tell a receipt from a flyer. */

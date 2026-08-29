@@ -261,3 +261,28 @@ CREATE TABLE IF NOT EXISTS purchase_lines (
   line_total      NUMERIC NOT NULL,
   PRIMARY KEY (purchase_id, line_no)
 );
+
+-- ---------------------------------------------------------------------------
+-- resolver / match index (§6.4)
+-- ---------------------------------------------------------------------------
+-- Candidate RETRIEVAL only. This narrows the catalogue to a shortlist; the exact
+-- score is then recomputed in `core` by the pure scorer, because pg_trgm and the
+-- scorer disagree slightly by construction and the auditable number must be the
+-- one the domain computed, not the one the index guessed.
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+CREATE TABLE IF NOT EXISTS match_index (
+  product_id      TEXT PRIMARY KEY REFERENCES products (id) ON DELETE CASCADE,
+  -- The name AFTER normalisation and with the size removed: leaving "454 g" in
+  -- makes two unrelated 454 g products look alike for the wrong reason.
+  normalized_name TEXT NOT NULL,
+  name_tokens     TEXT[] NOT NULL,
+  brand_norm      TEXT,
+  size_amount     NUMERIC,
+  size_unit       TEXT,
+  size_dimension  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS match_index_trgm
+  ON match_index USING gin (normalized_name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS match_index_brand ON match_index (brand_norm);

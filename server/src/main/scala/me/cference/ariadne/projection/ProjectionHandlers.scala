@@ -4,6 +4,7 @@ import me.cference.ariadne.domain.*
 import me.cference.ariadne.domain.price.{PriceEvent, PriceSource}
 import me.cference.ariadne.domain.product.{ProductEvent, ProductStatus}
 import me.cference.ariadne.domain.store.StoreEvent
+import me.cference.ariadne.matching.MatchInput
 import me.cference.ariadne.projection.ReadModelRepository.{CurrentPriceRow, PriceHistoryRow}
 
 import scala.concurrent.{ExecutionContext, Future}
@@ -37,6 +38,8 @@ object ProjectionHandlers {
             None
           )
           _ <- e.gtin.fold(Future.unit)(g => repo.addGtin(g.value, id))
+          // products first: match_index carries a foreign key onto it.
+          _ <- indexFor(repo, id, e.name, e.brand, e.size)
         } yield ()
 
       case e: ProductEvent.ProductIdentifierAdded => repo.addGtin(e.gtin.value, id)
@@ -55,7 +58,13 @@ object ProjectionHandlers {
       case e: ProductEvent.ProductMerged =>
         // The LOSER becomes a tombstone pointing at the winner. The row is not deleted:
         // ids never die, they forward, and callers hold ids we do not control (§6.5).
-        repo.setProductStatus(id, "MergedInto", Some(e.into.value))
+        // It IS dropped from the match index though: a tombstone must never come back
+        // as a candidate, or the matcher would re-link a listing onto a product that is
+        // no longer a distinct thing.
+        for {
+          _ <- repo.setProductStatus(id, "MergedInto", Some(e.into.value))
+          _ <- repo.deleteMatchIndex(id)
+        } yield ()
 
       case e: ProductEvent.ProductAbsorbed =>
         // The WINNER takes over the loser's keys so every identifier the loser answered
@@ -140,6 +149,18 @@ object ProjectionHandlers {
       // append-only store exists to prevent.
       case _: PriceEvent.PriceObservationRetracted => Future.unit
     }
+
+  /** The index stores the name AFTER normalisation, with the size split out (§6.3). */
+  private def indexFor(
+      repo: ReadModelRepository,
+      id: String,
+      name: String,
+      brand: Option[String],
+      knownSize: Option[Quantity]
+  ): Future[Unit] = {
+    val input = MatchInput.from(name, brand, knownSize)
+    repo.upsertMatchIndex(id, input.normalized, input.tokens, input.brand, input.size)
+  }
 
   private def statusName(s: ProductStatus): String = s match {
     case ProductStatus.Provisional => "Provisional"
