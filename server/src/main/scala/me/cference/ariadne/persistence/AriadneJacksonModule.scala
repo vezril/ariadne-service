@@ -10,6 +10,7 @@ import me.cference.ariadne.domain.*
 import me.cference.ariadne.domain.price.{PriceEvent, PriceSource}
 import me.cference.ariadne.domain.product.{ProductEvent, ProductStatus}
 import me.cference.ariadne.domain.purchase.{PurchaseEvent, PurchaseSource}
+import me.cference.ariadne.domain.resolution.ResolutionEvent
 import me.cference.ariadne.domain.store.StoreEvent
 
 /**
@@ -117,5 +118,9 @@ final class AriadneJacksonModule extends SimpleModule("AriadneDomainModule") {
     context.setMixInAnnotations(classOf[PriceScope], classOf[DomainMixins.PriceScopeMixin])
     context.setMixInAnnotations(classOf[PriceSource], classOf[DomainMixins.PriceSourceMixin])
     context.setMixInAnnotations(classOf[PurchaseSource], classOf[DomainMixins.PurchaseSourceMixin])
+    context.setMixInAnnotations(
+      classOf[ResolutionEvent],
+      classOf[DomainMixins.ResolutionEventMixin]
+    )
   }
 }

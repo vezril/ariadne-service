@@ -3,7 +3,13 @@ package me.cference.ariadne.projection
 import me.cference.ariadne.domain.price.PriceEvent
 import me.cference.ariadne.domain.product.ProductEvent
 import me.cference.ariadne.domain.store.StoreEvent
-import me.cference.ariadne.persistence.{PriceStreamEntity, ProductEntity, StoreEntity}
+import me.cference.ariadne.domain.resolution.ResolutionEvent
+import me.cference.ariadne.persistence.{
+  PriceStreamEntity,
+  ProductEntity,
+  ResolutionCaseEntity,
+  StoreEntity
+}
 import org.apache.pekko.actor.typed.ActorSystem
 import org.apache.pekko.cluster.sharding.typed.ShardedDaemonProcessSettings
 import org.apache.pekko.cluster.sharding.typed.scaladsl.ShardedDaemonProcess
@@ -83,6 +89,18 @@ object AriadneProjections {
       // (persistence_id, seq_nr) key that makes re-delivery a no-op.
       handler =
         () => new Handler[PriceEvent]((pid, seq, e) => ProjectionHandlers.price(repo)(pid, seq, e))
+    )
+
+  def resolutionProjection(repo: ReadModelRepository, r: Range)(using
+      system: ActorSystem[?],
+      ec: ExecutionContext
+  ): Projection[EventEnvelope[ResolutionEvent]] =
+    R2dbcProjection.exactlyOnce(
+      projectionId = ProjectionId("review-queue", s"${r.min}-${r.max}"),
+      settings = None,
+      sourceProvider = provider[ResolutionEvent](ResolutionCaseEntity.EntityPrefix, r),
+      handler = () =>
+        new Handler[ResolutionEvent]((pid, _, e) => ProjectionHandlers.resolution(repo)(pid, e))
     )
 
   /** Start every projection under ShardedDaemonProcess. Call once at boot. */

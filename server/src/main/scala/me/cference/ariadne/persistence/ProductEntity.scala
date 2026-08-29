@@ -55,4 +55,5 @@ object Tags {
   val Store = "store"
   val Price = "price"
   val Purchase = "purchase"
+  val Resolution = "resolution"
 }

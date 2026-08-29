@@ -2,32 +2,22 @@ package me.cference.ariadne.resolver
 
 import me.cference.ariadne.domain.{
   Confidence,
-  Gtin,
-  ListingKey,
   MatchMethod,
   MatcherVersion,
   MeasureUnit,
+  ProductId,
   Quantity
 }
+import me.cference.ariadne.domain.resolution.{MatchSubject, ScoredCandidate}
 import me.cference.ariadne.matching.{MatchConfig, MatchInput, Scorer}
 import me.cference.ariadne.projection.ReadModelRepository
 import me.cference.ariadne.projection.ReadModelRepository.MatchCandidateRow
 
 import scala.concurrent.{ExecutionContext, Future}
 
-/** What we are trying to identify — a scraped listing, or a Dionysus ingredient. */
-final case class MatchSubject(
-    name: String,
-    brand: Option[String] = None,
-    gtin: Option[Gtin] = None,
-    listing: Option[ListingKey] = None
-)
-
-final case class ScoredCandidate(productId: String, score: Confidence, notes: List[String])
-
 /** The three answers the resolver can give (§6.4). */
 enum ResolutionOutcome {
-  case Matched(productId: String, confidence: Confidence, method: MatchMethod)
+  case Matched(productId: ProductId, confidence: Confidence, method: MatchMethod)
   case Ambiguous(candidates: List[ScoredCandidate])
   case NoMatch
 }
@@ -77,14 +67,18 @@ final class Resolver(repo: ReadModelRepository, config: ResolverConfig = Resolve
     }
     byGtin.flatMap {
       case Some((id, method)) =>
-        canonical(id).map(c => Some(ResolutionOutcome.Matched(c, Confidence.Certain, method)))
+        canonical(id).map(c =>
+          Some(ResolutionOutcome.Matched(ProductId(c), Confidence.Certain, method))
+        )
       case None =>
         subject.listing match {
           case Some(k) =>
             repo.findProductByListing(k.storeId.value, k.externalId).flatMap {
               case Some(id) =>
                 canonical(id).map(c =>
-                  Some(ResolutionOutcome.Matched(c, Confidence.Certain, MatchMethod.Listing))
+                  Some(
+                    ResolutionOutcome.Matched(ProductId(c), Confidence.Certain, MatchMethod.Listing)
+                  )
                 )
               case None => Future.successful(None)
             }
@@ -109,7 +103,7 @@ final class Resolver(repo: ReadModelRepository, config: ResolverConfig = Resolve
             size = quantityOf(row)
           )
           val s = Scorer.score(input, candidate, config.matching)
-          ScoredCandidate(row.productId, s.confidence, s.notes)
+          ScoredCandidate(ProductId(row.productId), s.confidence, s.notes)
         }
         .sortBy(-_.score.toDouble)
 

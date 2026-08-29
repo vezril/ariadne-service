@@ -286,3 +286,30 @@ CREATE TABLE IF NOT EXISTS match_index (
 CREATE INDEX IF NOT EXISTS match_index_trgm
   ON match_index USING gin (normalized_name gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS match_index_brand ON match_index (brand_norm);
+
+-- ---------------------------------------------------------------------------
+-- review-queue (§3, §6.5) — what ariadne-ui shows a human
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS resolution_cases (
+  id              TEXT PRIMARY KEY,
+  state           TEXT NOT NULL,            -- pending | resolved
+  subject_name    TEXT NOT NULL,
+  subject_brand   TEXT,
+  subject_gtin    TEXT,
+  subject_store   TEXT,
+  subject_listing TEXT,
+  -- The candidates as offered, with the score the DOMAIN computed. Stored as JSON
+  -- because this is a display payload, not something queried by shape — and because
+  -- the review UI must show exactly what the matcher offered at the time, not a
+  -- re-derivation from a matcher that may since have changed (§6.6).
+  candidates      JSONB NOT NULL DEFAULT '[]'::jsonb,
+  outcome         TEXT,
+  parked_count    INT NOT NULL DEFAULT 0,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  decided_at      TIMESTAMPTZ
+);
+
+-- The queue is read newest-pending-first; a partial index keeps that cheap as
+-- decided cases accumulate and are never shown again.
+CREATE INDEX IF NOT EXISTS resolution_cases_pending
+  ON resolution_cases (created_at DESC) WHERE state = 'pending';

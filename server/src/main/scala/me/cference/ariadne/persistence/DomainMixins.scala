@@ -5,6 +5,7 @@ import me.cference.ariadne.domain.*
 import me.cference.ariadne.domain.price.{PriceEvent, PriceSource}
 import me.cference.ariadne.domain.product.{ProductEvent, ProductStatus}
 import me.cference.ariadne.domain.purchase.{PurchaseEvent, PurchaseSource}
+import me.cference.ariadne.domain.resolution.ResolutionEvent
 import me.cference.ariadne.domain.store.StoreEvent
 
 /**
@@ -138,4 +139,35 @@ private[persistence] object DomainMixins {
     )
   )
   trait PurchaseSourceMixin
+
+  @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
+  @JsonSubTypes(
+    Array(
+      new JsonSubTypes.Type(
+        value = classOf[ResolutionEvent.ResolutionProposed],
+        name = "ResolutionProposed"
+      ),
+      new JsonSubTypes.Type(
+        value = classOf[ResolutionEvent.ObservationParked],
+        name = "ObservationParked"
+      ),
+      new JsonSubTypes.Type(
+        value = classOf[ResolutionEvent.ResolutionConfirmed],
+        name = "ResolutionConfirmed"
+      ),
+      new JsonSubTypes.Type(
+        value = classOf[ResolutionEvent.ResolutionRejected],
+        name = "ResolutionRejected"
+      ),
+      new JsonSubTypes.Type(
+        value = classOf[ResolutionEvent.MergeRequested],
+        name = "MergeRequested"
+      ),
+      new JsonSubTypes.Type(
+        value = classOf[ResolutionEvent.SplitRequested],
+        name = "SplitRequested"
+      )
+    )
+  )
+  trait ResolutionEventMixin
 }
