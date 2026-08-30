@@ -1,6 +1,6 @@
 package me.cference.ariadne.persistence
 
-import me.cference.ariadne.domain.{PriceScope, ProductId}
+import me.cference.ariadne.domain.{Area, ChainId, PriceScope, ProductId, StoreId}
 import me.cference.ariadne.domain.price.{
   PriceCommand,
   PriceEvent,
@@ -30,13 +30,36 @@ object PriceStreamEntity {
 
   val EntityPrefix = "price"
 
-  sealed trait Command
+  val TypeKey: org.apache.pekko.cluster.sharding.typed.scaladsl.EntityTypeKey[Command] =
+    org.apache.pekko.cluster.sharding.typed.scaladsl.EntityTypeKey[Command](EntityPrefix)
+
+  sealed trait Command extends me.cference.ariadne.domain.CborSerializable
   final case class Execute(
       command: PriceCommand,
       now: Instant,
       replyTo: ActorRef[StatusReply[Done]]
   ) extends Command
   final case class GetState(replyTo: ActorRef[PriceStreamState]) extends Command
+
+  /**
+   * The inverse of `Sharding.priceEntityId`. Sharding hands back an entity id string, and the
+   * behaviour needs the structured scope again.
+   *
+   * Splits on the FIRST separator only: a scope key itself contains ':' and may contain further
+   * structure, while a ProductId never contains '|'.
+   */
+  def parseEntityId(entityId: String): (ProductId, PriceScope) = {
+    val i = entityId.indexOf('|')
+    require(i > 0, s"malformed price entity id: $entityId")
+    val productId = ProductId(entityId.substring(0, i))
+    val scopeKey = entityId.substring(i + 1)
+    val scope = scopeKey.split(':').toList match {
+      case "store" :: storeId :: Nil => PriceScope.Exact(StoreId(storeId))
+      case "area" :: chain :: area :: Nil => PriceScope.Regional(ChainId(chain), Area(area))
+      case _ => throw new IllegalArgumentException(s"unrecognised price scope key: $scopeKey")
+    }
+    (productId, scope)
+  }
 
   def persistenceId(productId: ProductId, scope: PriceScope): PersistenceId =
     PersistenceId.ofUniqueId(s"$EntityPrefix|${productId.value}|${scope.key}")
@@ -57,7 +80,7 @@ object PriceStreamEntity {
       case Execute(domain, now, replyTo) =>
         PriceObservation.decide(state, domain, now) match {
           case Right(events) => Effect.persist(events).thenReply(replyTo)(_ => StatusReply.ack())
-          case Left(error) => Effect.reply(replyTo)(StatusReply.error(DomainException(error)))
+          case Left(error) => Effect.reply(replyTo)(StatusReply.error(error.message))
         }
       case GetState(replyTo) => Effect.reply(replyTo)(state)
     }

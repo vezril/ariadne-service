@@ -34,22 +34,19 @@ final class ProductEntitySpec
   private val gtin = Gtin.unsafe("4006381333931")
 
   /**
-   * Verify EVENTS, not commands or state — and deliberately so.
+   * Commands ARE verified now.
    *
-   * Events are what goes in the journal, so their serializability is a correctness property and is
-   * checked here. Commands are local today (no cluster sharding in the build yet) and state is
-   * never snapshotted, so neither crosses a wire or a restart. Turning those checks on would force
-   * commands and states into sealed traits for no benefit anything currently relies on.
-   *
-   * If sharding lands, commands DO start crossing nodes and `verifyCommands` should be switched on
-   * — the conversion is the same one the events already went through, and this comment is the
-   * reminder that it was a deferral rather than an oversight.
+   * PR #6 deferred this: commands were local, so their serializability was not a correctness
+   * property and forcing them into sealed traits would have been churn. Sharding changed that — a
+   * command can now cross a node boundary — so the deferral came due and the conversion was done.
+   * State stays unverified because nothing is snapshotted yet; when snapshots land, this is the
+   * line that should change.
    */
   private val serializationSettings =
     EventSourcedBehaviorTestKit.SerializationSettings.enabled
       .withVerifyEquality(true)
       .withVerifyEvents(true)
-      .withVerifyCommands(false)
+      .withVerifyCommands(true)
       .withVerifyState(false)
 
   private def kit =

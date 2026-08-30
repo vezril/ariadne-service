@@ -17,7 +17,10 @@ object PurchaseEntity {
 
   val EntityPrefix = "purchase"
 
-  sealed trait Command
+  val TypeKey: org.apache.pekko.cluster.sharding.typed.scaladsl.EntityTypeKey[Command] =
+    org.apache.pekko.cluster.sharding.typed.scaladsl.EntityTypeKey[Command](EntityPrefix)
+
+  sealed trait Command extends me.cference.ariadne.domain.CborSerializable
   final case class Execute(
       command: PurchaseCommand,
       now: Instant,
@@ -40,7 +43,7 @@ object PurchaseEntity {
       case Execute(domain, now, replyTo) =>
         Purchase.decide(state, domain, now) match {
           case Right(events) => Effect.persist(events).thenReply(replyTo)(_ => StatusReply.ack())
-          case Left(error) => Effect.reply(replyTo)(StatusReply.error(DomainException(error)))
+          case Left(error) => Effect.reply(replyTo)(StatusReply.error(error.message))
         }
       case GetState(replyTo) => Effect.reply(replyTo)(state)
     }

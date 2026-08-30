@@ -58,7 +58,7 @@ object ResolutionState {
   ) extends ResolutionState
 }
 
-sealed trait ResolutionCommand
+sealed trait ResolutionCommand extends CborSerializable
 object ResolutionCommand {
   final case class Propose(
       id: ResolutionId,

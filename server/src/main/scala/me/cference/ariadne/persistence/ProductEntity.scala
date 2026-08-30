@@ -18,7 +18,10 @@ object ProductEntity {
 
   val EntityPrefix = "product"
 
-  sealed trait Command
+  val TypeKey: org.apache.pekko.cluster.sharding.typed.scaladsl.EntityTypeKey[Command] =
+    org.apache.pekko.cluster.sharding.typed.scaladsl.EntityTypeKey[Command](EntityPrefix)
+
+  sealed trait Command extends me.cference.ariadne.domain.CborSerializable
   final case class Execute(command: ProductCommand, replyTo: ActorRef[StatusReply[Done]])
       extends Command
   final case class GetState(replyTo: ActorRef[ProductState]) extends Command
@@ -40,14 +43,25 @@ object ProductEntity {
           // An empty event list is a legitimate no-op (a repeated scrape), not a failure —
           // it must still acknowledge, or every duplicate would surface as an error.
           case Right(events) => Effect.persist(events).thenReply(replyTo)(_ => StatusReply.ack())
-          case Left(error) => Effect.reply(replyTo)(StatusReply.error(DomainException(error)))
+          case Left(error) => Effect.reply(replyTo)(StatusReply.error(error.message))
         }
       case GetState(replyTo) => Effect.reply(replyTo)(state)
     }
 }
 
-/** Carries a `DomainError` across the ask boundary without flattening it to a string. */
-final case class DomainException(error: DomainError) extends RuntimeException(error.message)
+/**
+ * A rejection reply carries the error's MESSAGE, not the error object.
+ *
+ * Found by turning on command verification once sharding landed: replies cross node boundaries too,
+ * and a `RuntimeException` wrapping a `DomainError` is not serializable — Java serialization is
+ * disabled, deliberately. `StatusReply.error(String)` is serializable natively.
+ *
+ * What this trades: a caller gets a sentence, not a typed error it can branch on. Nothing needs
+ * that yet — `decide` still returns the full `DomainError` to everything inside the service, and
+ * only the reply is flattened. When the REST surface needs to map failures onto status codes, the
+ * fix is a serializable reply ADT rather than reviving an exception, and this is the note saying so
+ * was a choice.
+ */
 
 /** Projection tags (DESIGN §3) — the axis each read model subscribes to. */
 object Tags {

@@ -27,8 +27,10 @@ enum PriceStreamState {
   case Open(productId: ProductId, scope: PriceScope, last: Option[LastObservation], count: Long)
 }
 
-enum PriceCommand {
-  case ObservePrice(
+sealed trait PriceCommand extends CborSerializable
+
+object PriceCommand {
+  final case class ObservePrice(
       productId: ProductId,
       scope: PriceScope,
       price: Money,
@@ -39,8 +41,12 @@ enum PriceCommand {
       priceConfidence: Confidence,
       sizeConfidence: Confidence,
       correlationId: CorrelationId
-  )
-  case RetractObservation(observedAt: Instant, reason: String, correlationId: CorrelationId)
+  ) extends PriceCommand
+  final case class RetractObservation(
+      observedAt: Instant,
+      reason: String,
+      correlationId: CorrelationId
+  ) extends PriceCommand
 }
 
 sealed trait PriceEvent extends CborSerializable

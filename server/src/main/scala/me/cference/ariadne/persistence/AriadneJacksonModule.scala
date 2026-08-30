@@ -7,11 +7,11 @@ import com.fasterxml.jackson.databind.module.SimpleModule
 import com.fasterxml.jackson.databind.ser.std.StdSerializer
 import com.fasterxml.jackson.databind.{DeserializationContext, JsonNode, SerializerProvider}
 import me.cference.ariadne.domain.*
-import me.cference.ariadne.domain.price.{PriceEvent, PriceSource}
-import me.cference.ariadne.domain.product.{ProductEvent, ProductStatus}
-import me.cference.ariadne.domain.purchase.{PurchaseEvent, PurchaseSource}
-import me.cference.ariadne.domain.resolution.ResolutionEvent
-import me.cference.ariadne.domain.store.StoreEvent
+import me.cference.ariadne.domain.price.{PriceCommand, PriceEvent, PriceSource}
+import me.cference.ariadne.domain.product.{ProductCommand, ProductEvent, ProductStatus}
+import me.cference.ariadne.domain.purchase.{PurchaseCommand, PurchaseEvent, PurchaseSource}
+import me.cference.ariadne.domain.resolution.{ResolutionCommand, ResolutionEvent}
+import me.cference.ariadne.domain.store.{StoreCommand, StoreEvent}
 
 /**
  * Teaches Pekko's Jackson mapper the domain's value types and its polymorphic ADTs. Registered via
@@ -121,6 +121,18 @@ final class AriadneJacksonModule extends SimpleModule("AriadneDomainModule") {
     context.setMixInAnnotations(
       classOf[ResolutionEvent],
       classOf[DomainMixins.ResolutionEventMixin]
+    )
+    // Commands cross nodes once the entities are sharded, so they need type info too.
+    context.setMixInAnnotations(classOf[ProductCommand], classOf[DomainMixins.ProductCommandMixin])
+    context.setMixInAnnotations(classOf[StoreCommand], classOf[DomainMixins.StoreCommandMixin])
+    context.setMixInAnnotations(classOf[PriceCommand], classOf[DomainMixins.PriceCommandMixin])
+    context.setMixInAnnotations(
+      classOf[PurchaseCommand],
+      classOf[DomainMixins.PurchaseCommandMixin]
+    )
+    context.setMixInAnnotations(
+      classOf[ResolutionCommand],
+      classOf[DomainMixins.ResolutionCommandMixin]
     )
   }
 }

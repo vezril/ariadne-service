@@ -22,22 +22,24 @@ enum StoreState {
   )
 }
 
-enum StoreCommand {
-  case RegisterStore(
+sealed trait StoreCommand extends CborSerializable
+
+object StoreCommand {
+  final case class RegisterStore(
       id: StoreId,
       name: String,
       chain: ChainId,
       area: Area,
       label: Option[String],
       correlationId: CorrelationId
-  )
-  case UpdateStoreDetails(
+  ) extends StoreCommand
+  final case class UpdateStoreDetails(
       name: Option[String],
       area: Option[Area],
       label: Option[String],
       correlationId: CorrelationId
-  )
-  case DeactivateStore(correlationId: CorrelationId)
+  ) extends StoreCommand
+  final case class DeactivateStore(correlationId: CorrelationId) extends StoreCommand
 }
 
 sealed trait StoreEvent extends CborSerializable

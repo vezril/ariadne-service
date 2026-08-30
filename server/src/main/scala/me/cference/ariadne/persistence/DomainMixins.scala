@@ -2,11 +2,11 @@ package me.cference.ariadne.persistence
 
 import com.fasterxml.jackson.annotation.{JsonSubTypes, JsonTypeInfo}
 import me.cference.ariadne.domain.*
-import me.cference.ariadne.domain.price.{PriceEvent, PriceSource}
-import me.cference.ariadne.domain.product.{ProductEvent, ProductStatus}
-import me.cference.ariadne.domain.purchase.{PurchaseEvent, PurchaseSource}
-import me.cference.ariadne.domain.resolution.ResolutionEvent
-import me.cference.ariadne.domain.store.StoreEvent
+import me.cference.ariadne.domain.price.{PriceCommand, PriceEvent, PriceSource}
+import me.cference.ariadne.domain.product.{ProductCommand, ProductEvent, ProductStatus}
+import me.cference.ariadne.domain.purchase.{PurchaseCommand, PurchaseEvent, PurchaseSource}
+import me.cference.ariadne.domain.resolution.{ResolutionCommand, ResolutionEvent}
+import me.cference.ariadne.domain.store.{StoreCommand, StoreEvent}
 
 /**
  * Polymorphic type information for the journaled ADTs, supplied as MIX-INS.
@@ -170,4 +170,74 @@ private[persistence] object DomainMixins {
     )
   )
   trait ResolutionEventMixin
+
+  @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
+  @JsonSubTypes(
+    Array(
+      new JsonSubTypes.Type(
+        value = classOf[ProductCommand.RegisterProduct],
+        name = "RegisterProduct"
+      ),
+      new JsonSubTypes.Type(value = classOf[ProductCommand.AddIdentifier], name = "AddIdentifier"),
+      new JsonSubTypes.Type(value = classOf[ProductCommand.AddAlias], name = "AddAlias"),
+      new JsonSubTypes.Type(value = classOf[ProductCommand.LinkListing], name = "LinkListing"),
+      new JsonSubTypes.Type(value = classOf[ProductCommand.MergeInto], name = "MergeInto"),
+      new JsonSubTypes.Type(value = classOf[ProductCommand.Absorb], name = "Absorb"),
+      new JsonSubTypes.Type(value = classOf[ProductCommand.Deprecate], name = "Deprecate")
+    )
+  )
+  trait ProductCommandMixin
+
+  @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
+  @JsonSubTypes(
+    Array(
+      new JsonSubTypes.Type(value = classOf[StoreCommand.RegisterStore], name = "RegisterStore"),
+      new JsonSubTypes.Type(
+        value = classOf[StoreCommand.UpdateStoreDetails],
+        name = "UpdateStoreDetails"
+      ),
+      new JsonSubTypes.Type(value = classOf[StoreCommand.DeactivateStore], name = "DeactivateStore")
+    )
+  )
+  trait StoreCommandMixin
+
+  @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
+  @JsonSubTypes(
+    Array(
+      new JsonSubTypes.Type(value = classOf[PriceCommand.ObservePrice], name = "ObservePrice"),
+      new JsonSubTypes.Type(
+        value = classOf[PriceCommand.RetractObservation],
+        name = "RetractObservation"
+      )
+    )
+  )
+  trait PriceCommandMixin
+
+  @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
+  @JsonSubTypes(
+    Array(
+      new JsonSubTypes.Type(
+        value = classOf[PurchaseCommand.RecordPurchase],
+        name = "RecordPurchase"
+      ),
+      new JsonSubTypes.Type(value = classOf[PurchaseCommand.VoidPurchase], name = "VoidPurchase")
+    )
+  )
+  trait PurchaseCommandMixin
+
+  @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
+  @JsonSubTypes(
+    Array(
+      new JsonSubTypes.Type(value = classOf[ResolutionCommand.Propose], name = "Propose"),
+      new JsonSubTypes.Type(
+        value = classOf[ResolutionCommand.ParkObservation],
+        name = "ParkObservation"
+      ),
+      new JsonSubTypes.Type(value = classOf[ResolutionCommand.Confirm], name = "Confirm"),
+      new JsonSubTypes.Type(value = classOf[ResolutionCommand.Reject], name = "Reject"),
+      new JsonSubTypes.Type(value = classOf[ResolutionCommand.RequestMerge], name = "RequestMerge"),
+      new JsonSubTypes.Type(value = classOf[ResolutionCommand.RequestSplit], name = "RequestSplit")
+    )
+  )
+  trait ResolutionCommandMixin
 }
