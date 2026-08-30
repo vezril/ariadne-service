@@ -346,8 +346,9 @@ session):
 |---|---|
 | `UnitPriceCalculator`, `PriceTextParser`, `MultiBuyParser`, `PercentOffParser` | **Move to Ariadne** — they compute *facts*. (The percent-off *number* is a fact; the is-it-a-deal *verdict* on it stays Demeter.) |
 | `ObservationAssembler` | **The fact/judgment boundary itself** — its successor is Ariadne's `PriceObserved` producer (the last pipeline stage above) |
+| `ProductKeys` | **NEITHER moves nor stays — RETIRED AT CUTOVER.** Demeter's identity function, `sha256(merchantId \| name-tokens \| size)`, superseded by Ariadne's resolver. It cannot be deleted with the ingestion move: `alert_ledger`, `price_observation` and every watch key are built on it, so Demeter keeps using it right up to cutover, when the id map rewrites those rows. Named explicitly because absence from this table reads as *not considered*, and this is precisely what the id map replaces. (Demeter session, 2026-08-30.) |
 | `TextNormalizer`, `BilingualSplitter` | **SHARED LIBRARY — not a move.** Used by BOTH the matcher and fact extraction; `minFuzzyLength=7` is tuned against a real production false positive. **Never fork** (two drifting copies = bug generator). **DECIDED (Calvin, 2026-08-26): Ariadne owns it, embedded in `core` as the self-contained package `me.cference.ariadne.text`; publishing a separate artifact is deferred until a third consumer exists.** The island rule (zero imports from Ariadne's domain types; supporting types defined inside the package) is what keeps that extraction cheap — see §10.5. Demeter's `Confidence` becomes `SplitConfidence` on the way in, to avoid colliding with §6's match score. |
-| `FlippSource` / `FlyerSource` / `FlippDecoders`, the fetch ledger, rate limiting | **Move to Ariadne** (port, don't rewrite) |
+| `FlippSource` / `FlyerSource` / `FlippDecoders`, the fetch ledger, rate limiting | **Move to Ariadne** — but see §2.6.1: "port, don't rewrite" holds for the pure half only; the effect layer must be re-implemented |
 | `PriceStats`, `DealVerdict`, watchlist/alerting/insight/CPI | **Stay in Demeter** (judgments), now fed by Ariadne |
 
 **Flipp source quirks — load-bearing, carried verbatim** (descending pain, from the Demeter
@@ -370,6 +371,46 @@ session; ignore any of these and the corpus corrupts *quietly*):
 5. **One postal code decides which stores' flyers exist** — config, no useful default.
 6. **No auth** — an unauthenticated public endpoint; the politeness policy (#2 + #3) is
    load-bearing, not optional tuning.
+
+### 2.6.1 What actually ports, and what must be re-implemented
+
+**"Port, don't rewrite" cannot hold uniformly, and the split runs THROUGH files rather than
+between them** (Demeter session, 2026-08-30 — measured by them, re-verified here against their
+tree).
+
+The stacks do not meet: Demeter is Scala 2.13.18 with cats-effect + http4s + doobie; Ariadne is
+Scala 3.3.4 with Pekko and r2dbc and **zero** cats-effect references. Pure code crosses almost
+free — `-Xsource:3` has been on in Demeter from the start precisely to make this cheap — while
+anything in `F[_]` must be rebuilt.
+
+| Component | Ports verbatim | Must be re-implemented |
+|---|---|---|
+| `FlippDecoders` | **all of it** — 0 effectful references (verified) | — |
+| `UnitPriceCalculator`, `PriceTextParser`, `MultiBuyParser`, `PercentOffParser` | **all of them** — pure by construction | — |
+| `HttpPolicy` | `Backoff.wait` (pure, deliberately split from the clock so it could be property-tested), `BotWallDetection.classify`, `HeadersPolicy` | `RateLimiter[F]` — cats-effect `Temporal` |
+| `FlippSource`, `Http4sTransport`, `FlyerSource` | — | http4s `Client`, `F[_]` throughout |
+| fetch ledger | — | doobie → r2dbc |
+
+**What must survive the rewrite is not the code — it is the CONSTANTS and the SEMANTICS.** A
+faithful-looking Pekko rewrite that quietly changes one of these is a correct-looking port that
+behaves differently against a bot-walled upstream, and no test written from the new code would
+notice:
+
+```
+maxAttempts  = 3
+backoffBase  = 1.second
+backoffCap   = 30.seconds
+rateLimit    = 4          // requests per window, per source
+rateWindow   = 1.minute   // <- the window itself. "4 per window" is meaningless without it,
+                          //    and this doc previously recorded the 4 and omitted the minute.
+```
+
+Plus the **bot-wall signature list** (not merely the 403 check), the **fetch ledger's real key
+`(flyer_id, window_from, window_to)`** — the flyer id alone is NOT the key, and keying on it would
+stop re-fetching once a window rolls — and the **merchant re-stamp** (quirk #1).
+
+Those constants, the signature list, the ledger key and the re-stamp are the port's actual
+acceptance criteria. The code around them is replaceable; they are not.
 
 **Raw-response archive + replay — a FIRST-CLASS requirement, not an optimization.** Demeter
 archives raw response bytes *before* anything trusts the parse, and can re-derive the full
