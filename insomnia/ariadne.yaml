@@ -1,0 +1,125 @@
+# Insomnia collection for ariadne-service (DESIGN §4 — kept live as the API evolves).
+#
+# Import: Insomnia > Preferences > Data > Import Data > From File.
+# Set the `base` environment variable to wherever the service is reachable.
+#
+# Every REST endpoint the service exposes appears here. If you add a route and do not add
+# it here, the collection stops being the thing you can hand someone to try the API.
+type: collection.insomnia.rest/5.0
+name: ariadne
+meta:
+  id: wrk_ariadne
+  created: 1756500000000
+  modified: 1756500000000
+collection:
+  - name: catalog
+    meta: { id: fld_catalog, sortKey: -1 }
+    children:
+      - name: Get product
+        meta: { id: req_get_product, sortKey: -10 }
+        method: GET
+        url: "{{ _.base }}/api/v1/products/{{ _.productId }}"
+        headers:
+          - { name: Accept, value: application/json }
+      - name: Search products
+        meta: { id: req_search_products, sortKey: -9 }
+        method: GET
+        url: "{{ _.base }}/api/v1/products/search"
+        parameters:
+          - { name: q, value: butter }
+          - { name: limit, value: "20" }
+        headers:
+          - { name: Accept, value: application/json }
+      - name: Current price at a store
+        meta: { id: req_current_price, sortKey: -8 }
+        method: GET
+        url: "{{ _.base }}/api/v1/products/{{ _.productId }}/price"
+        parameters:
+          - { name: storeId, value: "{{ _.storeId }}" }
+        headers:
+          - { name: Accept, value: application/json }
+        description: >-
+          Resolves exact-over-area. The `scope` field says whether the number came from a
+          store-specific observation or the chain's flyer for that region.
+  - name: review queue
+    meta: { id: fld_review, sortKey: -2 }
+    children:
+      - name: List pending cases
+        meta: { id: req_list_cases, sortKey: -10 }
+        method: GET
+        url: "{{ _.base }}/api/v1/resolutions"
+        parameters:
+          - { name: limit, value: "50" }
+        headers:
+          - { name: Accept, value: application/json }
+      - name: Confirm
+        meta: { id: req_confirm, sortKey: -9 }
+        method: POST
+        url: "{{ _.base }}/api/v1/resolutions/{{ _.caseId }}/confirm"
+        body:
+          mimeType: application/json
+          text: |-
+            { "productId": "{{ _.productId }}" }
+        headers:
+          - { name: Content-Type, value: application/json }
+          - { name: X-Correlation-Id, value: "{{ _.correlationId }}" }
+        description: >-
+          productId must be one of the candidates the matcher offered; anything else is a 409.
+          Use Reject to create a different product instead.
+      - name: Reject (create a new product)
+        meta: { id: req_reject, sortKey: -8 }
+        method: POST
+        url: "{{ _.base }}/api/v1/resolutions/{{ _.caseId }}/reject"
+        body:
+          mimeType: application/json
+          text: |-
+            { "productId": "new-product-id" }
+        headers:
+          - { name: Content-Type, value: application/json }
+      - name: Merge
+        meta: { id: req_merge, sortKey: -7 }
+        method: POST
+        url: "{{ _.base }}/api/v1/resolutions/{{ _.caseId }}/merge"
+        body:
+          mimeType: application/json
+          text: |-
+            { "winner": "canonical-product-id", "loser": "duplicate-product-id" }
+        headers:
+          - { name: Content-Type, value: application/json }
+        description: >-
+          The loser becomes a forwarding tombstone. Its id keeps resolving forever, because
+          Dionysus and Demeter hold ids Ariadne does not control.
+      - name: Split
+        meta: { id: req_split, sortKey: -6 }
+        method: POST
+        url: "{{ _.base }}/api/v1/resolutions/{{ _.caseId }}/split"
+        body:
+          mimeType: application/json
+          text: |-
+            {
+              "listingStoreId": "{{ _.storeId }}",
+              "listingExternalId": "ext-9",
+              "productId": "new-product-id"
+            }
+        headers:
+          - { name: Content-Type, value: application/json }
+  - name: ops
+    meta: { id: fld_ops, sortKey: -3 }
+    children:
+      - name: Health
+        meta: { id: req_health, sortKey: -10 }
+        method: GET
+        url: "{{ _.base }}/health"
+      - name: OpenAPI document
+        meta: { id: req_openapi, sortKey: -9 }
+        method: GET
+        url: "{{ _.base }}/docs/openapi.yaml"
+environments:
+  name: Base Environment
+  meta: { id: env_base }
+  data:
+    base: http://localhost:8080
+    productId: p-1
+    storeId: s-1
+    caseId: r-1
+    correlationId: insomnia-local

@@ -398,6 +398,68 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
     )()
       .map(_.headOption.map(_.longValue).getOrElse(0L))
 
+  /** The pending review queue, newest first — what ariadne-ui lists (§6.5). */
+  def listPendingCases(limit: Int = 50): Future[List[CaseRow]] =
+    query(
+      """SELECT id, subject_name, subject_brand, subject_gtin, subject_store, subject_listing,
+                candidates::text, parked_count, created_at
+         FROM resolution_cases
+         WHERE state = 'pending'
+         ORDER BY created_at DESC
+         LIMIT $1""",
+      r =>
+        CaseRow(
+          r.get(0, classOf[String]),
+          r.get(1, classOf[String]),
+          Option(r.get(2, classOf[String])),
+          Option(r.get(3, classOf[String])),
+          Option(r.get(4, classOf[String])),
+          Option(r.get(5, classOf[String])),
+          r.get(6, classOf[String]),
+          r.get(7, classOf[Integer]).intValue,
+          r.get(8, classOf[Instant])
+        )
+    )(Integer.valueOf(limit))
+
+  def getProduct(id: String): Future[Option[ProductRow]] =
+    query(
+      """SELECT id, name, brand, category, size_amount, size_unit, status, merged_into
+         FROM products WHERE id = $1""",
+      productRow
+    )(id).map(_.headOption)
+
+  /**
+   * Typeahead over the catalogue. Ranked by trigram similarity against the SAME normalised text the
+   * matcher indexes, so what a human searches and what the resolver matches agree — a search that
+   * ranked differently from the matcher would make the review queue confusing to work.
+   *
+   * Tombstones are excluded: they forward, and offering one as a search result invites a human to
+   * link something onto a product that no longer exists as a distinct thing.
+   */
+  def searchProducts(term: String, limit: Int = 20): Future[List[ProductRow]] =
+    query(
+      """SELECT p.id, p.name, p.brand, p.category, p.size_amount, p.size_unit, p.status, p.merged_into
+         FROM products p
+         JOIN match_index mi ON mi.product_id = p.id
+         WHERE p.merged_into IS NULL
+           AND (mi.normalized_name ILIKE '%' || $1 || '%' OR similarity(mi.normalized_name, $1) >= 0.2)
+         ORDER BY similarity(mi.normalized_name, $1) DESC
+         LIMIT $2""",
+      productRow
+    )(term, Integer.valueOf(limit))
+
+  private val productRow: Row => ProductRow = r =>
+    ProductRow(
+      r.get(0, classOf[String]),
+      r.get(1, classOf[String]),
+      Option(r.get(2, classOf[String])),
+      Option(r.get(3, classOf[String])),
+      Option(r.get(4, classOf[java.math.BigDecimal])).map(BigDecimal(_)),
+      Option(r.get(5, classOf[String])),
+      r.get(6, classOf[String]),
+      Option(r.get(7, classOf[String]))
+    )
+
   // ------------------------------------------------------------------ plumbing
 
   private def exec(sql: String, args: Any*): Future[Unit] =
@@ -495,6 +557,29 @@ object ReadModelRepository {
       observedAt: Instant,
       source: String,
       sizeConfidence: Double
+  )
+
+  final case class CaseRow(
+      id: String,
+      subjectName: String,
+      subjectBrand: Option[String],
+      subjectGtin: Option[String],
+      subjectStore: Option[String],
+      subjectListing: Option[String],
+      candidatesJson: String,
+      parkedCount: Int,
+      createdAt: Instant
+  )
+
+  final case class ProductRow(
+      id: String,
+      name: String,
+      brand: Option[String],
+      category: Option[String],
+      sizeAmount: Option[BigDecimal],
+      sizeUnit: Option[String],
+      status: String,
+      mergedInto: Option[String]
   )
 
   /** One shortlist entry, as stored — the scorer re-derives everything else. */
