@@ -23,7 +23,10 @@ object ResolutionCaseEntity {
 
   val EntityPrefix = "resolution"
 
-  sealed trait Command
+  val TypeKey: org.apache.pekko.cluster.sharding.typed.scaladsl.EntityTypeKey[Command] =
+    org.apache.pekko.cluster.sharding.typed.scaladsl.EntityTypeKey[Command](EntityPrefix)
+
+  sealed trait Command extends me.cference.ariadne.domain.CborSerializable
   final case class Execute(command: ResolutionCommand, replyTo: ActorRef[StatusReply[Done]])
       extends Command
   final case class GetState(replyTo: ActorRef[ResolutionState]) extends Command
@@ -46,7 +49,7 @@ object ResolutionCaseEntity {
       case Execute(domain, replyTo) =>
         ResolutionCase.decide(state, domain) match {
           case Right(events) => Effect.persist(events).thenReply(replyTo)(_ => StatusReply.ack())
-          case Left(error) => Effect.reply(replyTo)(StatusReply.error(DomainException(error)))
+          case Left(error) => Effect.reply(replyTo)(StatusReply.error(error.message))
         }
       case GetState(replyTo) => Effect.reply(replyTo)(state)
     }

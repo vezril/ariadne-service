@@ -38,8 +38,10 @@ enum ProductState {
   )
 }
 
-enum ProductCommand {
-  case RegisterProduct(
+sealed trait ProductCommand extends CborSerializable
+
+object ProductCommand {
+  final case class RegisterProduct(
       id: ProductId,
       name: String,
       brand: Option[String],
@@ -48,30 +50,30 @@ enum ProductCommand {
       gtin: Option[Gtin],
       origin: Origin,
       correlationId: CorrelationId
-  )
-  case AddIdentifier(gtin: Gtin, correlationId: CorrelationId)
-  case AddAlias(alias: String, correlationId: CorrelationId)
-  case LinkListing(
+  ) extends ProductCommand
+  final case class AddIdentifier(gtin: Gtin, correlationId: CorrelationId) extends ProductCommand
+  final case class AddAlias(alias: String, correlationId: CorrelationId) extends ProductCommand
+  final case class LinkListing(
       key: ListingKey,
       confidence: Confidence,
       how: MatchMethod,
       matcher: MatcherVersion,
       resolution: Option[ResolutionRef],
       correlationId: CorrelationId
-  )
-  case MergeInto(
+  ) extends ProductCommand
+  final case class MergeInto(
       canonical: ProductId,
       resolution: Option[ResolutionRef],
       correlationId: CorrelationId
-  )
-  case Absorb(
+  ) extends ProductCommand
+  final case class Absorb(
       loser: ProductId,
       gtins: Set[Gtin],
       aliases: Set[String],
       listings: Set[ListingKey],
       correlationId: CorrelationId
-  )
-  case Deprecate(reason: String, correlationId: CorrelationId)
+  ) extends ProductCommand
+  final case class Deprecate(reason: String, correlationId: CorrelationId) extends ProductCommand
 }
 
 sealed trait ProductEvent extends CborSerializable

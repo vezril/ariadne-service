@@ -35,8 +35,10 @@ enum PurchaseState {
   )
 }
 
-enum PurchaseCommand {
-  case RecordPurchase(
+sealed trait PurchaseCommand extends CborSerializable
+
+object PurchaseCommand {
+  final case class RecordPurchase(
       id: PurchaseId,
       storeId: StoreId,
       purchasedAt: Instant,
@@ -44,8 +46,9 @@ enum PurchaseCommand {
       total: Money,
       source: PurchaseSource,
       correlationId: CorrelationId
-  )
-  case VoidPurchase(reason: String, correlationId: CorrelationId)
+  ) extends PurchaseCommand
+  final case class VoidPurchase(reason: String, correlationId: CorrelationId)
+      extends PurchaseCommand
 }
 
 sealed trait PurchaseEvent extends CborSerializable
