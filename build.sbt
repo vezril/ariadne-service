@@ -86,6 +86,9 @@ lazy val server = (project in file("server"))
       "org.apache.pekko" %% "pekko-http-spray-json" % pekkoHttpVersion,
       "org.apache.pekko" %% "pekko-slf4j" % pekkoVersion,
       "ch.qos.logback" % "logback-classic" % logbackVersion,
+      // Swagger UI served from the CLASSPATH — DESIGN §4 requires self-hosted /docs with
+      // zero CDN egress, so the assets ship in the image rather than being fetched.
+      "org.webjars" % "swagger-ui" % "5.17.14",
       // Structured JSON logs (the constellation log schema — see the add-structured-logging spec).
       "net.logstash.logback" % "logstash-logback-encoder" % logstashEncoderVersion,
       // --- persistence + read-side projections (DESIGN §2, §3) ---

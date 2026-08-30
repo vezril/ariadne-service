@@ -1,0 +1,195 @@
+openapi: 3.0.3
+info:
+  title: Ariadne — Product Catalog
+  description: |
+    The browser-facing surface of the constellation's Product Catalog.
+
+    **REST is for ariadne-ui only.** Service-to-service traffic uses gRPC (`ariadne.v1`, contract
+    in the Lexicon). This surface is a thin mirror of the same queries and commands — there is no
+    second behaviour behind it.
+
+    Reads hit **projections**, never entities: CQRS is held strictly, so a recovering aggregate
+    cannot stall a page load.
+  version: 0.1.0
+servers:
+  - url: /
+tags:
+  - name: catalog
+    description: Product identity and prices.
+  - name: review
+    description: The identity-resolution review queue — hot spot #1's human backstop.
+paths:
+  /api/v1/products/{id}:
+    get:
+      tags: [catalog]
+      summary: Fetch a product by id
+      description: Merged ids keep resolving; a tombstone reports its canonical id in `mergedInto`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: The product, content: { application/json: { schema: { $ref: "#/components/schemas/Product" } } } }
+        "404": { description: No such product, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /api/v1/products/search:
+    get:
+      tags: [catalog]
+      summary: Typeahead over the catalogue
+      description: |
+        Ranked by trigram similarity against the same normalised text the matcher indexes, so what
+        a human searches and what the resolver matches agree. Merge tombstones are excluded.
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 20 } }
+      responses:
+        "200": { description: Matches, content: { application/json: { schema: { $ref: "#/components/schemas/Products" } } } }
+  /api/v1/products/{id}/price:
+    get:
+      tags: [catalog]
+      summary: Current price of a product at a store
+      description: |
+        Resolves **exact over area**: the most recent store-specific observation if there is one,
+        otherwise the most recent regional (flyer) observation covering that store. The response
+        reports which, so a receipt price is distinguishable from a chain-wide flyer claim.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: storeId, in: query, required: true, schema: { type: string } }
+      responses:
+        "200": { description: The price, content: { application/json: { schema: { $ref: "#/components/schemas/Price" } } } }
+        "404": { description: No price known for that product at that store }
+  /api/v1/resolutions:
+    get:
+      tags: [review]
+      summary: The pending review queue, newest first
+      parameters:
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 50 } }
+      responses:
+        "200": { description: Pending cases, content: { application/json: { schema: { $ref: "#/components/schemas/Cases" } } } }
+  /api/v1/resolutions/{id}/confirm:
+    post:
+      tags: [review]
+      summary: Link the subject to one of the offered candidates
+      description: |
+        Releases any parked observations to the chosen product. `productId` **must** be one of the
+        candidates the matcher offered — choosing anything else is a different decision, and
+        `reject` is the verb for it.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/Decision" } } }
+      responses:
+        "202": { description: Accepted }
+        "400": { description: productId missing }
+        "409": { description: Not a candidate, or the case is already decided }
+  /api/v1/resolutions/{id}/reject:
+    post:
+      tags: [review]
+      summary: None of these — create a new product from the subject
+      description: Parked observations are released to the NEW product; the facts were real either way.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/Decision" } } }
+      responses:
+        "202": { description: Accepted }
+        "400": { description: productId (the new product) missing }
+        "409": { description: The case is already decided }
+  /api/v1/resolutions/{id}/merge:
+    post:
+      tags: [review]
+      summary: Two products are the same thing
+      description: |
+        The loser becomes a forwarding tombstone and the winner absorbs its keys. The loser's id
+        keeps resolving forever — Dionysus and Demeter hold ids Ariadne does not control.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/Decision" } } }
+      responses:
+        "202": { description: Accepted }
+        "400": { description: winner and loser required }
+        "409": { description: The case is already decided, or winner == loser }
+  /api/v1/resolutions/{id}/split:
+    post:
+      tags: [review]
+      summary: A listing was linked to the wrong product
+      description: Unlinks the listing onto a new product so bad facts stop accruing against the old one.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/Decision" } } }
+      responses:
+        "202": { description: Accepted }
+        "400": { description: listingStoreId, listingExternalId and productId required }
+        "409": { description: The case is already decided }
+  /health:
+    get:
+      summary: Liveness and readiness
+      responses:
+        "200": { description: UP }
+        "503": { description: DOWN — draining or not ready }
+components:
+  schemas:
+    Product:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        brand: { type: string, nullable: true }
+        category: { type: string, nullable: true, description: Coarse market category — NOT food-role, which is Dionysus's }
+        size: { type: string, nullable: true, example: "454 g" }
+        status: { type: string, enum: [Provisional, Active, MergedInto, Deprecated] }
+        mergedInto: { type: string, nullable: true, description: Set when this id forwards to a canonical product }
+    Products:
+      type: object
+      properties:
+        products: { type: array, items: { $ref: "#/components/schemas/Product" } }
+    Price:
+      type: object
+      properties:
+        amount: { type: string }
+        currency: { type: string }
+        observedAt: { type: string, format: date-time }
+        source: { type: string, enum: [Scrape, Purchase, Manual, Backfill] }
+        scope: { type: string, enum: [exact, area], description: "`exact` = this store; `area` = the chain's flyer for the region" }
+        isExact: { type: boolean }
+    Subject:
+      type: object
+      properties:
+        name: { type: string }
+        brand: { type: string, nullable: true }
+        gtin: { type: string, nullable: true }
+        storeId: { type: string, nullable: true }
+        externalId: { type: string, nullable: true }
+    Case:
+      type: object
+      properties:
+        id: { type: string }
+        subject: { $ref: "#/components/schemas/Subject" }
+        candidates:
+          type: array
+          description: As the matcher offered them, with the score the domain computed — not a re-derivation.
+          items:
+            type: object
+            properties:
+              productId: { type: string }
+              score: { type: number, format: double }
+              notes: { type: array, items: { type: string } }
+        parkedObservations:
+          type: integer
+          description: Price facts held back pending this decision — never attributed to a guess.
+        createdAt: { type: string, format: date-time }
+    Cases:
+      type: object
+      properties:
+        cases: { type: array, items: { $ref: "#/components/schemas/Case" } }
+    Decision:
+      type: object
+      properties:
+        productId: { type: string, nullable: true }
+        winner: { type: string, nullable: true }
+        loser: { type: string, nullable: true }
+        listingStoreId: { type: string, nullable: true }
+        listingExternalId: { type: string, nullable: true }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
