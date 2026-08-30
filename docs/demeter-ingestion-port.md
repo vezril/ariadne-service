@@ -70,13 +70,25 @@ honest model of what the flyer actually told us.
 
 | # | Gate | Owner | State |
 |---|---|---|---|
-| G1 | AlertKey — Calvin decided **(b)**; the (b) *design* is still to be written | **Demeter** | open, yours |
+| G1 | AlertKey — Calvin decided **(b)** | Demeter | **CLOSED** — design written and merged as `openspec/changes/alert-best-price-per-product` (demeter-service #46). Verified, not taken on report |
 | G2 | `size_confidence` + `price_confidence` on `PriceObserved` | Ariadne | **done** — on the event, the read model and the Lexicon proposal |
 | G3 | Shared `TextNormalizer`/`BilingualSplitter`, no forks | Ariadne+Demeter+Calvin | **closed** — Ariadne owns it, embedded in `core` as a self-contained package; you consume a published artifact when the migration runs |
-| G4 | Raw-archive + replay owned by Ariadne | Ariadne | committed in DESIGN §2.6; **built during the port**, not before |
+| G4 | Raw-archive + replay owned by Ariadne | Ariadne | committed in DESIGN §2.6 — **NOT BUILT YET.** See below; it is the port's first commit, not a follow-up |
 
-G1 is the only one on you, and it does not block the port — it blocks **cutover** (step 4), which
-is a separate authorization anyway.
+**All four gates are now closed or ours.** Nothing on your side blocks this.
+
+### G4 is the part we must not get wrong, and it is not built
+
+Your review made the reason concrete: `Replay.scala` re-derives the whole observation set from the
+raw archive, and it is your **only** insurance against a decoder bug — because flyers expire, so
+there is no re-fetch. A decoder mistake found a week late is otherwise unrecoverable data.
+
+DESIGN §2.6 commits Ariadne to archive-before-parse and to owning replay. It is designed and it is
+not written. So to be unambiguous about sequencing: **the archive lands as the first commit of the
+port, before any decoder runs against live Flipp.** Porting the decoders first and adding the
+archive after would leave a window where exactly the failure your Replay exists to survive is
+unsurvivable — and that window would be the riskiest days of the whole migration, when the ported
+code is newest.
 
 ## What we are NOT asking for yet
 
