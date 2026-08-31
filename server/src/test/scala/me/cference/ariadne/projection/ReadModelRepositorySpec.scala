@@ -67,6 +67,7 @@ final class ReadModelRepositorySpec
       1.0,
       1.0,
       "Scrape",
+      Some(1L),
       Some("c-1"),
       pid,
       seq

@@ -187,8 +187,8 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
       """INSERT INTO price_history
          (product_id, scope_kind, store_id, chain_id, area, observed_at, price_amount, price_currency,
           unit_price, unit_per_amount, unit_per_unit, promo, price_confidence, size_confidence,
-          source, correlation_id, persistence_id, seq_nr)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+          source, raw_response_id, correlation_id, persistence_id, seq_nr)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
          ON CONFLICT (persistence_id, seq_nr) DO NOTHING""",
       h.productId,
       h.scopeKind,
@@ -205,6 +205,7 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
       java.lang.Double.valueOf(h.priceConfidence),
       java.lang.Double.valueOf(h.sizeConfidence),
       h.source,
+      h.rawResponseId.map(java.lang.Long.valueOf).orNull,
       h.correlationId.orNull,
       h.persistenceId,
       java.lang.Long.valueOf(h.seqNr)
@@ -539,6 +540,8 @@ object ReadModelRepository {
       priceConfidence: Double,
       sizeConfidence: Double,
       source: String,
+      /** The archived bytes this fact came from. None for manual, purchase and migrated rows. */
+      rawResponseId: Option[Long],
       correlationId: Option[String],
       persistenceId: String,
       seqNr: Long

@@ -122,6 +122,7 @@ object ProjectionHandlers {
               e.priceConfidence.toDouble,
               e.sizeConfidence.toDouble,
               sourceName(e.source),
+              rawResponseIdOf(e.source),
               None,
               persistenceId,
               seqNr
@@ -224,6 +225,12 @@ object ProjectionHandlers {
     case ProductStatus.Active => "Active"
     case ProductStatus.Deprecated => "Deprecated"
     case _: ProductStatus.MergedInto => "MergedInto"
+  }
+
+  /** Only a scrape has archived bytes behind it; everything else legitimately has none. */
+  private def rawResponseIdOf(s: PriceSource): Option[Long] = s match {
+    case sc: PriceSource.Scrape => Some(sc.rawResponseId)
+    case _ => None
   }
 
   private def sourceName(s: PriceSource): String = s match {

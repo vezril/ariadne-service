@@ -10,7 +10,21 @@ import java.time.{Instant, ZoneId}
 sealed trait PriceSource
 
 object PriceSource {
-  final case class Scrape(scraper: String) extends PriceSource
+
+  /**
+   * A flyer/site scrape.
+   *
+   * `rawResponseId` is REQUIRED, not optional. A scraped price fact cannot exist without the
+   * archived bytes it was derived from — §2.6's archive-before-parse guarantee, made structural
+   * rather than procedural: there is no way to construct one that skipped the archive.
+   *
+   * Provenance is therefore a JOIN, not a correlation by timestamp (Demeter session, 2026-08-30 —
+   * their `price_observation.raw_response_id` is a real FK, and that is what makes "which bytes
+   * produced this row" answerable rather than hopeful).
+   *
+   * Migrated history uses `Backfill`, not `Scrape`, precisely because it has no archived response.
+   */
+  final case class Scrape(scraper: String, rawResponseId: Long) extends PriceSource
   final case class Purchase(purchaseId: PurchaseId) extends PriceSource
   case object Manual extends PriceSource
   final case class Backfill(origin: String) extends PriceSource
