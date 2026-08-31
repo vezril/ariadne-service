@@ -46,6 +46,7 @@ lazy val pekkoHttpVersion = "1.2.0"
 lazy val pekkoR2dbcVersion = "1.1.0"
 lazy val pekkoProjectionVersion = "1.1.0"
 lazy val testcontainersVersion = "0.41.4"
+lazy val circeVersion = "0.14.10"
 lazy val scalaTestVersion = "3.2.19"
 lazy val scalaCheckPlusVersion = "3.2.19.0"
 lazy val logbackVersion = "1.5.16"
@@ -80,6 +81,17 @@ lazy val server = (project in file("server"))
     name := "ariadne-server",
     Compile / mainClass := Some("me.cference.ariadne.Main"),
     libraryDependencies ++= Seq(
+      // circe, for the ported Flipp decoders ONLY.
+      //
+      // The service marshals its REST surface with spray-json, so this is a second JSON
+      // library and that deserves a reason. The decoders are ported verbatim from
+      // demeter-service, where they are circe-based and carry leniency rules tuned against
+      // a live upstream that adds fields without notice. Rewriting them onto spray-json
+      // would be precisely the rewrite the port exists to avoid, and it would put the
+      // tuning at risk to save one dependency. Boundary: circe stays inside the ingest
+      // package; nothing else in the service sees it.
+      "io.circe" %% "circe-core" % circeVersion,
+      "io.circe" %% "circe-parser" % circeVersion,
       "org.apache.pekko" %% "pekko-actor-typed" % pekkoVersion,
       "org.apache.pekko" %% "pekko-stream" % pekkoVersion,
       "org.apache.pekko" %% "pekko-http" % pekkoHttpVersion,
