@@ -152,7 +152,7 @@ final class SerializationSpec
         Confidence.Certain,
         Confidence.Certain,
         Instant.parse("2026-08-26T12:00:00Z"),
-        PriceSource.Scrape("flipp")
+        PriceSource.Scrape("flipp", rawResponseId = 1L)
       )
       val back = roundTrip(e)
       back shouldBe e
@@ -162,7 +162,7 @@ final class SerializationSpec
 
     "round-trip every PriceSource variant" in {
       List(
-        PriceSource.Scrape("flipp"),
+        PriceSource.Scrape("flipp", rawResponseId = 1L),
         PriceSource.Purchase(PurchaseId("pu-1")),
         PriceSource.Manual,
         PriceSource.Backfill("demeter")

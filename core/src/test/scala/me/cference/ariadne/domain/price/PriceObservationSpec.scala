@@ -16,7 +16,7 @@ final class PriceObservationSpec extends AnyFunSuite with Matchers {
   private val cid = CorrelationId("c-1")
   private val now = Instant.parse("2026-08-26T18:00:00Z")
   private val price = Money.unsafe(BigDecimal("4.99"))
-  private val scrape = PriceSource.Scrape("flipp")
+  private val scrape = PriceSource.Scrape("flipp", rawResponseId = 1L)
 
   private def observe(
       at: Instant,

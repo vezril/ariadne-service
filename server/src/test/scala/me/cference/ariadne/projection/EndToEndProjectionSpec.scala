@@ -149,7 +149,7 @@ final class EndToEndProjectionSpec
           scope,
           Money.unsafe(BigDecimal("5.49")),
           now,
-          PriceSource.Scrape("flipp"),
+          PriceSource.Scrape("flipp", rawResponseId = 1L),
           None,
           None,
           Confidence.Certain,

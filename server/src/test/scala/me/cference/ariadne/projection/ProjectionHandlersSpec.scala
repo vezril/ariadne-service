@@ -189,7 +189,7 @@ final class ProjectionHandlersSpec
           Confidence.Certain,
           Confidence.unsafe(0.4),
           now,
-          PriceSource.Scrape("flipp")
+          PriceSource.Scrape("flipp", rawResponseId = 1L)
         )
       )
       scalar(

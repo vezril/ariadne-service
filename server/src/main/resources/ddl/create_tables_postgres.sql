@@ -200,6 +200,18 @@ CREATE TABLE IF NOT EXISTS price_history (
   -- so dropping this would make its confidence silently read too high.
   size_confidence  DOUBLE PRECISION NOT NULL,
   source           TEXT NOT NULL,
+  -- Which archived bytes produced this row, so provenance is a JOIN rather than a
+  -- correlation by timestamp (Demeter, 2026-08-30). NULL for observations that never had
+  -- a raw response: manual entry, purchases, and migrated history.
+  --
+  -- NOT a foreign key, deliberately. price_history is a PROJECTION — dropped and rebuilt
+  -- from the journal — while raw_response is source data that is never rebuilt. A
+  -- constraint across that boundary would make a routine read-model rebuild depend on the
+  -- archive's state, which is the wrong coupling for the one table that must always be
+  -- writable. The guarantee is enforced where it actually binds: `PriceSource.Scrape`
+  -- REQUIRES a rawResponseId, so a scraped fact that skipped the archive cannot be
+  -- constructed at all. That is a compile error rather than a constraint violation.
+  raw_response_id  BIGINT,
   correlation_id   TEXT,
   -- The journal coordinates make re-delivery a no-op: at-least-once projection
   -- delivery means the same event WILL be seen twice after a restart.
@@ -313,3 +325,56 @@ CREATE TABLE IF NOT EXISTS resolution_cases (
 -- decided cases accumulate and are never shown again.
 CREATE INDEX IF NOT EXISTS resolution_cases_pending
   ON resolution_cases (created_at DESC) WHERE state = 'pending';
+
+-- ---------------------------------------------------------------------------
+-- raw-response archive (§2.6, gate G4)
+-- ---------------------------------------------------------------------------
+-- THE ONLY INSURANCE AGAINST A DECODER BUG.
+--
+-- Flyers expire, so there is no re-fetch: a parsing mistake found a week later is
+-- unrecoverable data unless the bytes were kept. Demeter shipped two parser fixes
+-- on 2026-08-26 alone whose effects would have been permanent without their
+-- equivalent of this table.
+--
+-- Bytes live in Postgres, NOT in Apollo blob storage as DESIGN §2.6 originally
+-- sketched. Archive-before-parse puts this on the ingest critical path, and a
+-- remote blob store there means an Apollo outage forces a choice between losing
+-- the scrape window (flyers expire) and parsing unarchived (losing exactly the
+-- insurance this exists for). Demeter has run the Postgres shape in production.
+-- Apollo remains available as a later tier for aging bytes out; `RawArchive` is an
+-- interface so that is a swap, not a redesign.
+CREATE TABLE IF NOT EXISTS raw_response (
+  id           BIGSERIAL PRIMARY KEY,
+  -- Ties every response fetched by one scrape run together, so replay can re-derive
+  -- a whole run rather than guessing at time boundaries.
+  run_id       TEXT NOT NULL,
+  source       TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  url          TEXT NOT NULL,
+  postal_code  TEXT,
+  locale       TEXT,
+  fetched_at   TIMESTAMPTZ NOT NULL,
+  content_type TEXT NOT NULL,
+  body         BYTEA NOT NULL,
+  body_sha256  BYTEA NOT NULL
+);
+
+-- RETENTION: none. Nothing deletes from this table on a schedule, and that is a decision,
+-- not an oversight — Demeter's equivalent has no retention either, but only because it never
+-- grew enough to force the question, which is a weak reason to inherit.
+--
+-- Deciding it here: the observations derived from these bytes are event-sourced and therefore
+-- permanent, so bytes deleted on a timer would leave permanent facts with dangling provenance
+-- and a replay that silently cannot cover that window. The window in which a decoder bug can go
+-- unnoticed is not knowable in advance, which is the entire reason the archive exists.
+--
+-- Volume does not force the question either: ~1 MB/day at one postal code, low single-digit GB
+-- per year even at several times the estimate, linear in postal codes rather than in items.
+--
+-- If volume ever does bite, the answer is TIERING, not deletion — and an Apollo tier must be an
+-- AGEING JOB, never a write path. The ingest path must never learn Apollo exists, so tiering can
+-- be down for a week without a scrape noticing. If tiering ever needs to be on the write path,
+-- that is the moment to reopen this decision, and not before.
+CREATE INDEX IF NOT EXISTS raw_response_run ON raw_response (run_id, id);
+CREATE INDEX IF NOT EXISTS raw_response_dedup
+  ON raw_response (source, kind, postal_code, locale, body_sha256, fetched_at);
