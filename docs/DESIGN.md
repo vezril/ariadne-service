@@ -387,6 +387,37 @@ it* — and the second would be invisible inside the first. It is counted as
 The consequence if it were kept is real though latent: a $0 phone drags a rolling minimum to zero
 permanently. It has not bitten Demeter only because nobody watches phones.
 
+### 2.6.0 Verifying the port: the archive diff, and its EXPECTED asymmetry
+
+Before a single live fetch, the ported decoders are run over Demeter's 271 archived responses and
+the result diffed against their 35,088 stored observations. Real bytes, a known-good answer, and
+the decoder isolated from the transport — a dual-run without the dual, and a stronger test of the
+decoder than the live dual-run will be.
+
+**The acceptance criterion is DIRECTIONAL, and it is written here before the test exists so that a
+non-zero diff cannot be rationalised after the fact.**
+
+| Direction | Meaning | Action |
+|---|---|---|
+| Ariadne produces items Demeter LACKS | **Expected.** Their bug, since fixed | none — this is the signal the fix worked |
+| Demeter has items Ariadne LACKS | **A port defect** | investigate; tell the Demeter session |
+
+Three dated sources of expected one-directional delta (Demeter session, 2026-09-01):
+
+1. **Nine archived responses have zero observations**, three of them from 2026-08-26 —
+   `raw_response` 167 (506 kB), 168 (159 kB), 171 (194 kB). Those are three flyers that 0.6.0 lost
+   *whole*: one unparseable item threw out of assembly and took the entire flyer with it. The
+   archive caught the bytes; only the parse discarded them. Expect a few hundred items from
+   responses where they have none.
+2. **Zero-size items.** Before 0.6.1 a size normalising to `0.000` threw. It now discards the
+   candidate and keeps the item with `size = None`, so archives predating 2026-08-26 decode to
+   *more* items than were stored at the time.
+3. **Oversized pack counts.** `"99999999999 x 500 ml"` threw `NumberFormatException` out of a pure
+   parser. Same shape, same fix, same asymmetry.
+
+Those three are also the argument for the archive existing at all: every one of them was
+recoverable only because the bytes were kept before anything trusted the parse.
+
 ### 2.6.1 What actually ports, and what must be re-implemented
 
 **"Port, don't rewrite" cannot hold uniformly, and the split runs THROUGH files rather than
