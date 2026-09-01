@@ -701,6 +701,51 @@ budgeting feed.
 
 ---
 
+### 7.1 Purchase entry from another service — writes do not degrade like reads
+
+Purchases are Ariadne's (Calvin, 2026-09-01). The consequence dionysus-planner raised is real and
+is designed for here rather than discovered later: **a purchase is a WRITE, and writes do not
+degrade the way reads do.** "Ariadne down means an unpriced shopping list" is easy because a
+missing price is a missing nicety. A dropped receipt is lost user data, and unlike a price it can
+never be reconstructed — the flyer feed will never contain what was actually paid.
+
+**The buffer must be client-side, and that is not a preference.** If Ariadne is unreachable the
+request never arrives, so there is nothing here to retry with; no amount of server-side retry
+semantics helps. The caller keeps a local write-ahead row and drains it, which makes its own
+purchase table an OUTBOX rather than a record of truth.
+
+**What that requires of Ariadne, and what has been changed to provide it:** re-recording the same
+purchase is now a **no-op success** rather than `AlreadyRegistered`. An error would be
+indistinguishable from a genuine failure, so the outbox could never drain — the row would retry
+forever. A *different* purchase under an already-taken id is still refused, because that is an id
+collision rather than a retry and accepting it would overwrite one receipt with another. Sameness
+is decided by content, not by the caller asserting it.
+
+The caller mints the `PurchaseId`, which is what makes the retry addressable at all.
+
+**Migration split, finer than "gated on the ingredient backfill":**
+
+- *Historic* receipts are keyed by the planner's `ingredientId` and can only reach a `ProductId`
+  through the ingredient link, so they wait for that backfill.
+- *New* entries resolve at entry time and do not. A purchase is about the product BOUGHT, not the
+  ingredient it will be cooked into — which is why an ingredient legitimately having no product
+  forever ("salt to taste") does not imply the purchase of salt has none. Unmatched purchased items
+  take a Provisional product and surface in the review queue, exactly as a scraped listing does.
+
+**A free-text store is a resolution problem one level up.** `purchase.store` is typed text
+("Metro", "IGA"); Ariadne needs a `StoreId`. Same ambiguity the resolver exists for, but over a
+handful of rows rather than a catalogue, so an alias table is likely to beat the fuzzy matcher.
+
+### 7.2 GAP — there is no store surface
+
+**Flagged by dionysus-planner, 2026-09-01, and confirmed: `CatalogRoutes` exposes `storeId` only as
+a query parameter. Nothing lists, resolves or registers a store.** The `StoreEntity` and the
+`stores`/`store_coverage` projections exist; no HTTP reaches them.
+
+The receipt migration cannot happen without it — resolving typed text to a franchise, registering
+one that does not exist, and populating an inline picker. Recorded as a dependency neither side had
+listed, on Ariadne's side, ahead of the build order rather than discovered during it.
+
 ## 8. Cross-cutting
 
 - **Correlation-id (HermesMQ v1.13.0 discipline):** adopt from incoming gRPC metadata / REST

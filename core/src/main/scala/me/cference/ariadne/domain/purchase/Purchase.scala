@@ -102,13 +102,34 @@ object Purchase {
 
       case (PurchaseState.Empty, _) => Left(DomainError.NotRegistered)
 
-      case (_: PurchaseState.Recorded, _: PurchaseCommand.RecordPurchase) =>
-        Left(DomainError.AlreadyRegistered)
+      case (s: PurchaseState.Recorded, c: PurchaseCommand.RecordPurchase) =>
+        // Re-recording the SAME purchase is a no-op success, not an error.
+        //
+        // Ariadne being unreachable cannot block someone typing a receipt: a dropped
+        // receipt is lost user data, and unlike a missing price it can never be
+        // reconstructed — the flyer feed will never contain what Calvin actually paid. So
+        // the caller buffers locally and retries, which means a retry of an already-
+        // recorded purchase MUST look like success or the outbox can never drain: an
+        // error is indistinguishable from a genuine failure and the row retries forever.
+        //
+        // A DIFFERENT purchase arriving under an id that is already taken is still a real
+        // error — that is an id collision, not a retry, and silently accepting it would
+        // overwrite one receipt with another.
+        if sameAs(s, c) then Right(Nil)
+        else Left(DomainError.AlreadyRegistered)
 
       case (s: PurchaseState.Recorded, c: PurchaseCommand.VoidPurchase) =>
         if s.voided then Left(DomainError.AlreadyVoided)
         else Right(List(PurchaseEvent.PurchaseVoided(c.reason)))
     }
+
+  /** Content equality, so a retry is recognised without trusting the caller to say so. */
+  private def sameAs(s: PurchaseState.Recorded, c: PurchaseCommand.RecordPurchase): Boolean =
+    s.storeId == c.storeId &&
+      s.purchasedAt == c.purchasedAt &&
+      s.total == c.total &&
+      s.source == c.source &&
+      s.lines == c.lines
 
   def evolve(state: PurchaseState, event: PurchaseEvent): PurchaseState =
     (state, event) match {
