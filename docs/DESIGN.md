@@ -415,6 +415,28 @@ Three dated sources of expected one-directional delta (Demeter session, 2026-09-
 3. **Oversized pack counts.** `"99999999999 x 500 ml"` threw `NumberFormatException` out of a pure
    parser. Same shape, same fix, same asymmetry.
 
+**READ THE MANIFEST FIRST — it says which world the diff is running in.** Demeter's export
+manifest carries `raw_response_without_observations` live at export time, and that one number
+decides how the table above is applied:
+
+```
+raw_response_without_observations = 9   ->  Replay has NOT run. Expect extras from
+                                            167/168/171 and six others. Expected noise.
+raw_response_without_observations = 0   ->  Replay HAS run; those responses now have
+                                            observations. Any extras our decoders produce
+                                            are UNEXPLAINED, and worth investigating.
+```
+
+Demeter has a `Replay` that re-derives observations from archived bytes, idempotently (observations
+key on the archive's fetch time, so a re-run inserts nothing for already-processed responses).
+Under their fixed parsers it would recover exactly those responses. Whether it runs is with Calvin,
+because it writes to `price_observation` — the table this project treats as irreplaceable.
+
+So the number flipping 9 -> 0 converts a whole category of expected noise into signal, and the
+manifest is the thing that tells us which. **This paragraph exists so a future reader who sees `0`
+and finds no extras concludes the caveat was RESOLVED rather than overblown.** The directional rule
+above is unchanged either way; it just applies to a smaller set.
+
 Those three are also the argument for the archive existing at all: every one of them was
 recoverable only because the bytes were kept before anything trusted the parse.
 
