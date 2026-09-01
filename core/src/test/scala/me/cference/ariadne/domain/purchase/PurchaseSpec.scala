@@ -93,6 +93,32 @@ final class PurchaseSpec extends AnyFunSuite with Matchers {
     )
   }
 
+  test("re-recording the SAME purchase is a no-op success — the outbox must be able to drain") {
+    // Ariadne being unreachable cannot block someone typing a receipt, so the caller
+    // buffers locally and retries. If a retry of an already-recorded purchase errored,
+    // the client could not tell it from a genuine failure and the row would retry
+    // forever. A dropped receipt is lost data that the flyer feed can never reconstruct.
+    val cmd = record(List(line("1.00")), "1.00", at = now)
+    val recorded = Purchase
+      .decide(PurchaseState.Empty, cmd, now)
+      .map(Purchase.replay)
+      .getOrElse(fail("should record"))
+    Purchase.decide(recorded, cmd, now) shouldBe Right(Nil)
+  }
+
+  test(
+    "a DIFFERENT purchase under a taken id is still refused — that is a collision, not a retry"
+  ) {
+    // Accepting this silently would overwrite one receipt with another.
+    val first = record(List(line("1.00")), "1.00", at = now)
+    val recorded = Purchase
+      .decide(PurchaseState.Empty, first, now)
+      .map(Purchase.replay)
+      .getOrElse(fail("should record"))
+    val different = record(List(line("9.99")), "9.99", at = now)
+    Purchase.decide(recorded, different, now) shouldBe Left(DomainError.AlreadyRegistered)
+  }
+
   test("recording twice into the same stream is refused") {
     val recorded = Purchase.replay(
       List(
