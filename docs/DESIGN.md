@@ -372,6 +372,21 @@ session; ignore any of these and the corpus corrupts *quietly*):
 6. **No auth** — an unauthenticated public endpoint; the politeness policy (#2 + #3) is
    load-bearing, not optional tuning.
 
+**Zero-priced items: rejected, and counted under their OWN reason.** Measured by the Demeter
+session across 35,088 real observations: exactly 3 rows priced 0.00, all `ScalarPrice` — the
+decoder read a true `0.00` out of the flyer. They are carrier handset promotions ("$0 phone" on a
+postpaid contract that is not free). So the number is **true** and using it as a price would be
+**false**: a real advertised price, and a meaningless comparable one.
+
+Ariadne's `Money` rejects non-positive, so these do not become price facts. That stands. But the
+rejection must NOT land in the generic decode-drop counter, because that counter would then mean
+two different things — *we could not read this* and *we read it perfectly and chose not to keep
+it* — and the second would be invisible inside the first. It is counted as
+`zero-priced (contract or promotional)`, a category rather than breakage.
+
+The consequence if it were kept is real though latent: a $0 phone drags a rolling minimum to zero
+permanently. It has not bitten Demeter only because nobody watches phones.
+
 ### 2.6.1 What actually ports, and what must be re-implemented
 
 **"Port, don't rewrite" cannot hold uniformly, and the split runs THROUGH files rather than
@@ -670,6 +685,22 @@ Asked explicitly during the Demeter alert-dedup decision (Calvin decided (b), 20
 > *negative* signal (§6.3). A `ProductId` therefore implies **one pack size**, and "best price
 > across stores" for that id is the lowest **effective price** — apples-to-apples by
 > construction.
+
+**A SUBDIVISION IS NOT A SECOND PRODUCT.** §6.7 governs *purchasable* units. A 366 g box of
+oatmeal containing 6 x 61 g pouches is ONE product: the box is what is bought, the pouch is a line
+printed on it. Ariadne carries the outer package size (366 g) and nothing else — that is what
+unit-price and identity are computed from.
+
+The inner pack (`packQuantity`/`packUnit` in dionysus-planner) **stays with Dionysus**, and the
+reason is the facts-only rule rather than convenience. Ask who needs it: Dionysus does, for
+portioning — recipes saying `{1%pack}`, the Eat dialog prefilling one pouch, pantry "−1 pack".
+Demeter does not; deals are about the purchasable unit. Ariadne does not; the box is the identity
+and the box is the unit price. An attribute exactly one consumer needs is the God-object signature,
+and "it is printed on the package" does not make it Ariadne's — nutrition is printed on the package
+too, and it lives in Dionysus for the same reason.
+
+(Ruled 2026-09-01 after the dionysus-planner session raised it. Recorded here because they asked
+§6.7 to say which way, and an unstated ruling is one that gets re-litigated.)
 
 If a consumer ever wants cross-size comparison ("cheapest butter per gram, any size"), that is a
 **downstream layer**: a Demeter watchlist-of-products compared on **unit price** — never an
