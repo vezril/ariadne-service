@@ -129,6 +129,20 @@ lazy val server = (project in file("server"))
       "com.dimafeng" %% "testcontainers-scala-postgresql" % testcontainersVersion % Test,
       "org.postgresql" % "postgresql" % "42.7.4" % Test
     ),
+    // Serial test execution, deliberately.
+    //
+    // Ten suites use testcontainers, and each starts its OWN Postgres. Run in parallel
+    // that is ten containers competing for the same Docker daemon, which produced a
+    // RestSurfaceSpec failure that passed on re-run — a flaky gate is worse than a slow
+    // one, because it teaches people to re-run rather than read.
+    //
+    // The obvious alternative, one shared container, is NOT safe here as written:
+    // ProjectionHandlersSpec and RestSurfaceSpec both seed product "p-1", so a shared
+    // database would give them genuine cross-talk rather than merely contention. Making
+    // sharing safe needs a schema per suite, which is worth doing when suite time starts
+    // to hurt and is not worth doing to fix a flake.
+    Test / parallelExecution := false,
+
     // BuildInfo exposes the dynver version to the running app (health endpoint).
     buildInfoKeys := Seq[BuildInfoKey](name, version, scalaVersion, sbtVersion),
     buildInfoPackage := "me.cference.ariadne.build",
