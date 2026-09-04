@@ -4,6 +4,7 @@ import io.r2dbc.spi.{ConnectionFactory, Row}
 import org.reactivestreams.Publisher
 
 import java.time.Instant
+import java.time.temporal.ChronoUnit
 import scala.concurrent.duration.*
 import scala.concurrent.{ExecutionContext, Future, Promise}
 
@@ -37,10 +38,33 @@ object FlyerLedger {
     recorded match {
       case None => true
       case Some(entry) =>
-        val windowChanged = entry.windowFrom != flyer.validFrom || entry.windowTo != flyer.validTo
+        // Compare at STORAGE precision, not in-memory precision.
+        //
+        // Postgres timestamptz keeps microseconds; Instant keeps nanoseconds, and on Linux
+        // it actually populates them — macOS does not, which is why this was invisible
+        // locally and only failed on CI. A round trip therefore truncates, so a raw != between
+        // a stored window and an in-memory one is ALWAYS true: every flyer looks re-issued,
+        // every flyer is re-fetched every day, and the ledger silently becomes a no-op. That is
+        // ~9x the load against an upstream that bot-walls — precisely the failure this function
+        // exists to prevent, arriving as a successful-looking run.
+        val windowChanged =
+          truncate(entry.windowFrom) != truncate(flyer.validFrom) ||
+            truncate(entry.windowTo) != truncate(flyer.validTo)
         val stale = entry.fetchedAt.plusMillis(maxAge.toMillis).isBefore(now)
         windowChanged || stale
     }
+
+  /**
+   * The precision the database can actually hold.
+   *
+   * Applied on the WAY IN as well as on comparison, and that ordering is the fix. Postgres does not
+   * truncate sub-microsecond input, it ROUNDS it: `.452136537` is stored as `.452137`, while
+   * truncating floors to `.452136`. Trying to reproduce the rounding on this side would be guessing
+   * at driver and server behaviour. Pre-truncating instead means the value written is already at
+   * storage precision, the round trip is lossless, and the comparison is exact rather than
+   * approximately right.
+   */
+  private[flipp] def truncate(i: Instant): Instant = i.truncatedTo(ChronoUnit.MICROS)
 }
 
 /**
@@ -82,9 +106,10 @@ final class PostgresFlyerLedger(
            fetched_at = EXCLUDED.fetched_at,
            raw_response_id = EXCLUDED.raw_response_id""",
       java.lang.Long.valueOf(flyerId.value),
-      windowFrom,
-      windowTo,
-      at,
+      // Truncated on the way IN, so what is stored is exactly what gets compared.
+      FlyerLedger.truncate(windowFrom),
+      FlyerLedger.truncate(windowTo),
+      FlyerLedger.truncate(at),
       java.lang.Long.valueOf(rawResponseId)
     )
 

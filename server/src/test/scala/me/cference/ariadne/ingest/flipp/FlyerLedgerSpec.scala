@@ -11,6 +11,7 @@ import org.scalatest.time.{Millis, Seconds, Span}
 import org.scalatest.wordspec.AnyWordSpec
 
 import java.time.Instant
+import java.time.temporal.ChronoUnit
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.*
 
@@ -47,7 +48,13 @@ final class FlyerLedgerSpec
 
   // Clock-relative, never literal — demeter's DailyRunSpec went red at midnight on a
   // hardcoded window, on a docs-only PR, taking five tests with it.
-  private val now = Instant.now()
+  // Clock-relative, never literal — demeter's DailyRunSpec went red at midnight on a
+  // hardcoded window. But ALSO carrying sub-microsecond nanoseconds on purpose:
+  // Postgres timestamptz truncates to microseconds, and Instant.now() populates nanos
+  // on Linux while macOS does not. Using the bare clock made this suite pass locally and
+  // fail on CI. Forcing the nanos makes the truncation behaviour deterministic on every
+  // platform instead of depending on the host's clock resolution.
+  private val now = Instant.now().truncatedTo(ChronoUnit.MICROS).plusNanos(537)
 
   private def flyer(
       id: Long,
@@ -131,7 +138,8 @@ final class FlyerLedgerSpec
 
       val entries = ledger.entriesFor(List(FlyerId(103))).futureValue
       entries should have size 1
-      entries(FlyerId(103)).windowFrom shouldBe reissued.validFrom
+      // Compared at storage precision: the database cannot hold the nanoseconds.
+      entries(FlyerId(103)).windowFrom shouldBe FlyerLedger.truncate(reissued.validFrom)
     }
 
     "re-select a flyer whose window moved, using the stored window" in {
@@ -141,6 +149,18 @@ final class FlyerLedgerSpec
 
       val reissued = flyer(104, from = now.plusSeconds(86400), to = now.plusSeconds(172800))
       ledger.selectToFetch(List(reissued), now).futureValue.map(_.id) shouldBe List(FlyerId(104))
+    }
+
+    "NOT re-select a flyer whose window survived a Postgres round trip" in {
+      // The bug CI caught and macOS hid. Postgres keeps microseconds, Instant keeps
+      // nanoseconds; a raw != between the stored window and the in-memory one is always
+      // true, so every flyer looks re-issued and gets re-fetched daily. That is ~9x the
+      // load against a bot-walled upstream, arriving as a completely successful run —
+      // the ledger silently doing nothing while reporting that it worked.
+      val f = flyer(105)
+      f.validFrom.getNano % 1000 should not be 0 // the fixture really does carry sub-micro nanos
+      ledger.markFetched(f.id, f.validFrom, f.validTo, archived(), now).futureValue
+      ledger.selectToFetch(List(f), now).futureValue shouldBe Nil
     }
 
     "return nothing for an empty listing without hitting the database" in {
