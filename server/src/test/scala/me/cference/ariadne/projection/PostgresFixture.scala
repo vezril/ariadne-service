@@ -38,7 +38,7 @@ trait PostgresFixture {
         st.execute(
           """TRUNCATE product_listings, product_aliases, product_gtins, products,
              store_coverage, stores, price_history, current_price,
-             match_index, resolution_cases, raw_response, purchase_lines, purchases RESTART IDENTITY CASCADE"""
+             match_index, resolution_cases, flyer_fetch_ledger, raw_response, purchase_lines, purchases RESTART IDENTITY CASCADE"""
         )
       }
     }

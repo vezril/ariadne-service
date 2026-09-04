@@ -378,3 +378,26 @@ CREATE TABLE IF NOT EXISTS raw_response (
 CREATE INDEX IF NOT EXISTS raw_response_run ON raw_response (run_id, id);
 CREATE INDEX IF NOT EXISTS raw_response_dedup
   ON raw_response (source, kind, postal_code, locale, body_sha256, fetched_at);
+
+-- ---------------------------------------------------------------------------
+-- flyer fetch ledger (§2.6, quirk #2)
+-- ---------------------------------------------------------------------------
+-- Decides which flyers are worth the expensive per-flyer items call. Demeter's
+-- figures: ~18 of 164 listed flyers on a typical day, against ~9x the load without
+-- it, against an upstream that bot-walls.
+--
+-- NOTE THE KEY. Demeter describes this as keyed on (flyer_id, window_from,
+-- window_to), and the literal reading — a composite primary key — would be WRONG:
+-- a re-issued flyer would insert a second row instead of updating, and the
+-- selection lookup would have two rows to choose between. Their table is
+-- `flyer_id PRIMARY KEY` with the window as COMPARED COLUMNS. The window is part
+-- of the DECISION key, not the row key. Verified against their schema rather than
+-- inferred from the phrase; it is exactly the class of correct-looking difference
+-- §2.6.1 warns the rewrite about.
+CREATE TABLE IF NOT EXISTS flyer_fetch_ledger (
+  flyer_id        BIGINT PRIMARY KEY,
+  window_from     TIMESTAMPTZ NOT NULL,
+  window_to       TIMESTAMPTZ NOT NULL,
+  fetched_at      TIMESTAMPTZ NOT NULL,
+  raw_response_id BIGINT NOT NULL REFERENCES raw_response (id)
+);
