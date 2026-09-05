@@ -1,7 +1,13 @@
 package me.cference.ariadne.http
 
 import me.cference.ariadne.domain.MeasureUnit
-import me.cference.ariadne.projection.ReadModelRepository.{CaseRow, ProductRow, ResolvedPrice}
+import me.cference.ariadne.projection.ReadModelRepository.{
+  CaseRow,
+  ProductRow,
+  ResolvedPrice,
+  StoreRow
+}
+import me.cference.ariadne.resolver.StoreCandidate
 import spray.json.*
 
 /**
@@ -54,6 +60,54 @@ object JsonFormats extends DefaultJsonProtocol {
       isExact: Boolean
   )
 
+  final case class StoreView(
+      id: String,
+      name: String,
+      chainId: String,
+      area: String,
+      label: Option[String],
+      active: Boolean
+  )
+
+  /** A franchise the typed receipt text might mean, and why it is a candidate (§7.1). */
+  final case class StoreMatchView(store: StoreView, score: Double, why: String)
+
+  /**
+   * The answer to "which store is this?".
+   *
+   * `unique` is stated EXPLICITLY rather than left for the caller to infer from `matches.length`. A
+   * receipt normally says "Metro", which names a chain rather than a franchise, so several correct
+   * matches is the ordinary case and not an error — but a caller that inferred uniqueness from a
+   * list of one would auto-pick on a coincidence. Making the claim a field means the server says
+   * whether the text actually narrowed.
+   */
+  final case class StoreResolutionView(
+      query: String,
+      unique: Boolean,
+      matches: List[StoreMatchView]
+  )
+
+  /**
+   * The answer to "which product is this?" (§6.4 Path B).
+   *
+   * `outcome` is one of `matched`, `ambiguous`, `no_match`, and ALL THREE are 200. A no-match is an
+   * answer — the catalogue genuinely does not know this product — and returning 404 would make a
+   * correct reply look like a broken request.
+   *
+   * `caseId` is present on `ambiguous`: the review case has been opened, and it is the handle a
+   * caller confirms against once a human picks (§6.5).
+   */
+  final case class ProductResolutionView(
+      outcome: String,
+      productId: Option[String],
+      confidence: Option[Double],
+      method: Option[String],
+      caseId: Option[String],
+      candidates: List[CandidateView]
+  )
+
+  final case class CandidateView(productId: String, score: Double, notes: List[String])
+
   /**
    * Collections are returned in an ENVELOPE, never as a bare array.
    *
@@ -64,6 +118,7 @@ object JsonFormats extends DefaultJsonProtocol {
    */
   final case class ProductsResponse(products: List[ProductView])
   final case class CasesResponse(cases: List[CaseView])
+  final case class StoresResponse(stores: List[StoreView])
 
   final case class ErrorView(error: String)
   final case class DecisionRequest(
@@ -81,6 +136,27 @@ object JsonFormats extends DefaultJsonProtocol {
   )
   final case class AcceptedView(id: String, status: String)
 
+  /**
+   * `id` is OPTIONAL. A receipt flow does not have one to offer, so the server derives a stable id
+   * from chain+area+name when it is absent — a retry of the same registration must not produce a
+   * second franchise (the same reasoning as the provisional product id, §6.4.1).
+   */
+  final case class RegisterStoreRequest(
+      id: Option[String],
+      name: String,
+      chainId: String,
+      area: String,
+      label: Option[String]
+  )
+
+  final case class ResolveProductRequest(
+      name: String,
+      brand: Option[String],
+      gtin: Option[String],
+      storeId: Option[String],
+      externalId: Option[String]
+  )
+
   given RootJsonFormat[ProductView] = jsonFormat7(ProductView.apply)
   given RootJsonFormat[SubjectView] = jsonFormat5(SubjectView.apply)
   given RootJsonFormat[CaseView] = jsonFormat5(CaseView.apply)
@@ -89,9 +165,17 @@ object JsonFormats extends DefaultJsonProtocol {
   given RootJsonFormat[DecisionRequest] = jsonFormat5(DecisionRequest.apply)
   given RootJsonFormat[RegisterProductRequest] = jsonFormat4(RegisterProductRequest.apply)
   given RootJsonFormat[AcceptedView] = jsonFormat2(AcceptedView.apply)
+  given RootJsonFormat[StoreView] = jsonFormat6(StoreView.apply)
+  given RootJsonFormat[StoreMatchView] = jsonFormat3(StoreMatchView.apply)
+  given RootJsonFormat[StoreResolutionView] = jsonFormat3(StoreResolutionView.apply)
+  given RootJsonFormat[CandidateView] = jsonFormat3(CandidateView.apply)
+  given RootJsonFormat[ProductResolutionView] = jsonFormat6(ProductResolutionView.apply)
+  given RootJsonFormat[RegisterStoreRequest] = jsonFormat5(RegisterStoreRequest.apply)
+  given RootJsonFormat[ResolveProductRequest] = jsonFormat5(ResolveProductRequest.apply)
 
   given RootJsonFormat[ProductsResponse] = jsonFormat1(ProductsResponse.apply)
   given RootJsonFormat[CasesResponse] = jsonFormat1(CasesResponse.apply)
+  given RootJsonFormat[StoresResponse] = jsonFormat1(StoresResponse.apply)
 
   def toProductView(r: ProductRow): ProductView =
     ProductView(
@@ -118,6 +202,18 @@ object JsonFormats extends DefaultJsonProtocol {
       scala.util.Try(r.candidatesJson.parseJson).getOrElse(JsArray.empty),
       r.parkedCount,
       r.createdAt.toString
+    )
+
+  def toStoreView(r: StoreRow): StoreView =
+    StoreView(r.id, r.name, r.chainId, r.area, r.label, r.active)
+
+  def toStoreMatchView(c: StoreCandidate): StoreMatchView =
+    // Rounded: the score is a ranking signal for a picker, and rendering 17 decimal
+    // places of a heuristic invites a reader to believe it is a measurement.
+    StoreMatchView(
+      toStoreView(c.store),
+      BigDecimal(c.score).setScale(3, BigDecimal.RoundingMode.HALF_UP).toDouble,
+      c.why
     )
 
   def toPriceView(p: ResolvedPrice): PriceView =

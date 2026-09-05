@@ -5,6 +5,7 @@ import me.cference.ariadne.domain.*
 import me.cference.ariadne.domain.product.{ProductEvent, ProductStatus}
 import me.cference.ariadne.domain.resolution.*
 import me.cference.ariadne.projection.{PostgresFixture, ProjectionHandlers, ReadModelRepository}
+import me.cference.ariadne.resolver.{ResolutionOutcome, ResolutionService}
 import org.apache.pekko.http.scaladsl.marshallers.sprayjson.SprayJsonSupport
 import org.apache.pekko.http.scaladsl.model.StatusCodes
 import org.apache.pekko.http.scaladsl.model.headers.RawHeader
@@ -57,7 +58,13 @@ final class RestSurfaceSpec
   private var lastCommand: Option[(ResolutionId, ResolutionCommand)] = None
   private var nextResult: Either[String, Unit] = Right(())
 
-  private lazy val catalog = new CatalogRoutes(repo)
+  private var nextOutcome: ResolutionOutcome = ResolutionOutcome.NoMatch
+  private var lastSubject: Option[MatchSubject] = None
+
+  private lazy val catalog = new CatalogRoutes(
+    repo,
+    (subject, _) => { lastSubject = Some(subject); Future.successful(nextOutcome) }
+  )
   private lazy val review = new ReviewRoutes(
     repo,
     (id, cmd) => { lastCommand = Some(id -> cmd); Future.successful(nextResult) }
@@ -246,6 +253,80 @@ final class RestSurfaceSpec
         DecisionRequest(Some("p-new"), None, None, Some("s-1"), Some("ext-9"))
       ) ~> routes ~> check {
         lastCommand.get._2 shouldBe a[ResolutionCommand.RequestSplit]
+      }
+    }
+  }
+
+  "resolving a subject (§6.4 Path B)" should {
+
+    "answer `matched` with the product and how it was decided" in {
+      nextOutcome =
+        ResolutionOutcome.Matched(ProductId("p-1"), Confidence.unsafe(0.97), MatchMethod.Fuzzy)
+      Post("/api/v1/products/resolve", ResolveProductRequest("butter", None, None, None, None)) ~>
+        routes ~> check {
+          status shouldBe StatusCodes.OK
+          val v = responseAs[ProductResolutionView]
+          v.outcome shouldBe "matched"
+          v.productId shouldBe Some("p-1")
+          v.confidence shouldBe Some(0.97)
+          v.method shouldBe Some("Fuzzy")
+        }
+    }
+
+    "answer `no_match` with 200 — absence is an ANSWER, not a broken request" in {
+      // A 404 here would be indistinguishable from a malformed call, and the caller's
+      // correct next move (register deliberately, §6.4) is not an error path.
+      nextOutcome = ResolutionOutcome.NoMatch
+      Post("/api/v1/products/resolve", ResolveProductRequest("nothing", None, None, None, None)) ~>
+        routes ~> check {
+          status shouldBe StatusCodes.OK
+          val v = responseAs[ProductResolutionView]
+          v.outcome shouldBe "no_match"
+          v.productId shouldBe None
+          v.candidates shouldBe empty
+        }
+    }
+
+    "answer `ambiguous` with the candidates AND the case to confirm against" in {
+      nextOutcome = ResolutionOutcome.Ambiguous(
+        List(ScoredCandidate(ProductId("p-1"), Confidence.unsafe(0.81), List("size conflict")))
+      )
+      val req = ResolveProductRequest("Lactantia Butter", Some("Lactantia"), None, None, None)
+      Post("/api/v1/products/resolve", req) ~> routes ~> check {
+        val v = responseAs[ProductResolutionView]
+        v.outcome shouldBe "ambiguous"
+        v.candidates.map(_.productId) shouldBe List("p-1")
+        v.candidates.head.notes shouldBe List("size conflict")
+        // The SAME case a scrape of this subject would open, not a parallel one — the
+        // id is derived from the subject, which is what keeps one question in one row.
+        v.caseId shouldBe Some(
+          ResolutionService.caseIdFor(MatchSubject("Lactantia Butter", Some("Lactantia"))).value
+        )
+      }
+    }
+
+    "refuse a request that identifies nothing" in {
+      Post("/api/v1/products/resolve", ResolveProductRequest("  ", None, None, None, None)) ~>
+        routes ~> check {
+          status shouldBe StatusCodes.BadRequest
+        }
+    }
+
+    "refuse HALF a listing key rather than silently dropping it" in {
+      // Half a key is not a weaker question, it is a different one. Dropping the half
+      // that was supplied would answer something the caller did not ask.
+      val req = ResolveProductRequest("butter", None, None, Some("s-1"), None)
+      Post("/api/v1/products/resolve", req) ~> routes ~> check {
+        status shouldBe StatusCodes.BadRequest
+        responseAs[ErrorView].error should include("externalId")
+      }
+    }
+
+    "reject a GTIN that fails its check digit before it reaches the matcher" in {
+      val req = ResolveProductRequest("butter", None, Some("4006381333930"), None, None)
+      Post("/api/v1/products/resolve", req) ~> routes ~> check {
+        status shouldBe StatusCodes.BadRequest
+        responseAs[ErrorView].error should include("gtin")
       }
     }
   }

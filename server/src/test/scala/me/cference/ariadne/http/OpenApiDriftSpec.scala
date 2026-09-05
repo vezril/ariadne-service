@@ -1,7 +1,10 @@
 package me.cference.ariadne.http
 
+import me.cference.ariadne.domain.StoreId
 import me.cference.ariadne.domain.resolution.{ResolutionCommand, ResolutionId}
+import me.cference.ariadne.domain.store.StoreCommand
 import me.cference.ariadne.projection.ReadModelRepository
+import me.cference.ariadne.resolver.StoreResolver
 import org.apache.pekko.http.scaladsl.marshallers.sprayjson.SprayJsonSupport
 import org.apache.pekko.http.scaladsl.model.HttpRequest
 import org.apache.pekko.http.scaladsl.server.Directives.concat
@@ -65,6 +68,13 @@ final class OpenApiDriftSpec
         "/api/v1/resolutions/r-1/split",
         DecisionRequest(Some("p"), None, None, Some("s"), Some("e"))
       ),
+    ("post", "/api/v1/products/resolve") ->
+      Post("/api/v1/products/resolve", ResolveProductRequest("butter", None, None, None, None)),
+    ("get", "/api/v1/stores") -> Get("/api/v1/stores"),
+    ("post", "/api/v1/stores") ->
+      Post("/api/v1/stores", RegisterStoreRequest(None, "IGA Beaubien", "iga", "H2X", None)),
+    ("get", "/api/v1/stores/resolve") -> Get("/api/v1/stores/resolve?q=metro"),
+    ("get", "/api/v1/stores/{id}") -> Get("/api/v1/stores/s-1"),
     ("get", "/health") -> Get("/health")
   )
 
@@ -73,10 +83,13 @@ final class OpenApiDriftSpec
   private val repo: ReadModelRepository = null
   private val decide: (ResolutionId, ResolutionCommand) => Future[Either[String, Unit]] =
     (_, _) => Future.successful(Right(()))
+  private val storeDecide: (StoreId, StoreCommand) => Future[Either[String, Unit]] =
+    (_, _) => Future.successful(Right(()))
 
   private val routes = concat(
     new CatalogRoutes(repo).routes,
     new ReviewRoutes(repo, decide).routes,
+    new StoreRoutes(repo, new StoreResolver(repo), storeDecide).routes,
     HealthRoutes("test", () => true),
     new DocsRoutes().routes
   )
@@ -107,8 +120,8 @@ final class OpenApiDriftSpec
       // dionysus-planner's gate would have silently matched zero routes after a
       // refactor and passed green. A parser that finds nothing must fail, not pass —
       // this assertion is the difference between failing closed and failing open.
-      documented.size should be >= 9
-      documented.map(_._2).distinct.size should be >= 8
+      documented.size should be >= 14
+      documented.map(_._2).distinct.size should be >= 13
     }
   }
 
