@@ -64,7 +64,25 @@ final class SerializationSpec
         Some("dairy"),
         Some(packSize),
         Some(gtin),
-        Origin.Scrape(listing),
+        Origin.Scrape("flipp", Some(listing)),
+        ProductStatus.Provisional
+      )
+      roundTrip(e) shouldBe e
+    }
+
+    "round-trip a Scrape origin with NO listing key — the Flipp case" in {
+      // Flipp item ids change weekly (§2.6 quirk #4), so a provisional product created
+      // from one records no listing key at all. That empty Option is the shape every
+      // real scraped provisional will have, and it takes a different Jackson path than
+      // the populated one.
+      val e = ProductEvent.ProductRegistered(
+        ProductId("p-prov"),
+        "Butter 454g",
+        None,
+        None,
+        None,
+        None,
+        Origin.Scrape("flipp", None),
         ProductStatus.Provisional
       )
       roundTrip(e) shouldBe e

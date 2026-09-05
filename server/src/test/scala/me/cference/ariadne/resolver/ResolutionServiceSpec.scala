@@ -69,3 +69,48 @@ final class ResolutionCaseIdSpec extends AnyWordSpec with Matchers {
     }
   }
 }
+
+/**
+ * The provisional product id is the other derived key in this file, and the more dangerous one.
+ *
+ * The case id only affects how tidy the review queue is. This one decides whether a scrape that
+ * meets an unknown product creates ONE provisional or a new product every time it runs — and the
+ * failure is silent, because a catalog full of near-duplicate provisionals looks exactly like a
+ * catalog that has seen a lot of products.
+ */
+final class ProvisionalIdSpec extends AnyWordSpec with Matchers {
+
+  private def idFor(s: MatchSubject) = ResolutionService.provisionalIdFor(s).value
+
+  "the provisional id" should {
+
+    "be stable across runs of the same subject" in {
+      val s = MatchSubject("Lactantia Salted Butter 454g", Some("Lactantia"))
+      idFor(s) shouldBe idFor(s)
+    }
+
+    "survive the formatting drift a retailer's display text actually has" in {
+      // The same item as the flyer renders it on two different days. Nothing here is a
+      // different product, and a key that said otherwise would mint a second one.
+      idFor(MatchSubject("Lactantia  Salted   Butter", Some("Lactantia"))) shouldBe
+        idFor(MatchSubject("LACTANTIA SALTED BUTTER!", Some("lactantia")))
+    }
+
+    "prefer the GTIN, which is identity rather than description" in {
+      val gtin = Some(Gtin.unsafe("4006381333931"))
+      idFor(MatchSubject("Butter", gtin = gtin)) shouldBe
+        idFor(MatchSubject("Beurre salé 454 g", Some("Lactantia"), gtin = gtin))
+    }
+
+    "keep genuinely different products apart" in {
+      idFor(MatchSubject("Lactantia Butter", Some("Lactantia"))) should not be
+        idFor(MatchSubject("Gay Lea Butter", Some("Gay Lea")))
+    }
+
+    "be recognisable as provisional in the journal" in {
+      // Operators read persistence ids. A provisional that looks like any other product
+      // id makes "how much of the catalog is auto-created?" an unanswerable question.
+      idFor(MatchSubject("Butter")) should startWith("prov-")
+    }
+  }
+}

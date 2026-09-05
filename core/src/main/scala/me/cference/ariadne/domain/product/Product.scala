@@ -126,7 +126,7 @@ object Product {
           // product that surfaces in the review queue; a human or a migration
           // yields an Active one.
           val status = c.origin match {
-            case Origin.Scrape(_) => ProductStatus.Provisional
+            case Origin.Scrape(_, _) => ProductStatus.Provisional
             case _ => ProductStatus.Active
           }
           Right(

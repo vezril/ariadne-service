@@ -89,7 +89,7 @@ final class ScrapeRunSpec
 
   private def runWith(
       transport: Transport,
-      resolve: MatchSubject => Future[Option[ProductId]] = _ =>
+      resolve: (MatchSubject, String) => Future[Option[ProductId]] = (_, _) =>
         Future.successful(Some(ProductId("p-1"))),
       observed: AtomicReference[List[(ProductId, FlippMapper.Observation)]] = new AtomicReference(
         Nil
@@ -134,6 +134,30 @@ final class ScrapeRunSpec
         ChainId("iga"),
         me.cference.ariadne.domain.Area("H2X")
       )
+    }
+
+    "cite the ITEMS response it read the price from, not the listing that led to it" in {
+      // A flyer id of its own: the ledger is real and shared across this suite, so
+      // reusing another test's id would make this one silently fetch nothing.
+      val t = new StubTransport(
+        Map("/flyers?" -> listingJson(91), "/flyers/91" -> itemsJson("\"4.99\""))
+      )
+      val (run, observed) = runWith(t)
+      run.run(source, "run-prov", now).futureValue
+
+      // Both responses are archived, in order: the flyer listing, then that flyer's
+      // items. The price was read out of the SECOND, and that is the one a
+      // PriceSource.Scrape has to name — citing the listing would point a re-derivation
+      // at bytes the price does not appear in, which is worse than citing nothing
+      // because it looks like provenance.
+      val archived = archive.replay("run-prov").futureValue
+      archived should have size 2
+      val itemsResponse = archived.last
+
+      val provenance = observed.get().head._2.provenance
+      provenance.scraper shouldBe "flipp"
+      provenance.rawResponseId shouldBe itemsResponse.id
+      archive.get(provenance.rawResponseId).futureValue.map(_.kind) shouldBe Some("flyer_items")
     }
 
     "record a REGIONAL scope, never an exact one — the feed has no franchise" in {
@@ -187,7 +211,7 @@ final class ScrapeRunSpec
     "PARK an unresolved item rather than attributing its price to a guess" in {
       val t =
         new StubTransport(Map("/flyers?" -> listingJson(51), "/flyers/51" -> itemsJson("\"6.99\"")))
-      val (run, observed) = runWith(t, resolve = _ => Future.successful(None))
+      val (run, observed) = runWith(t, resolve = (_, _) => Future.successful(None))
       val report = run.run(source, "run-parked", now).futureValue
       report.skipped.get(SkipReason.ParkedForReview) shouldBe Some(1)
       report.observationsAppended shouldBe 0

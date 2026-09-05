@@ -96,7 +96,17 @@ enum MatchMethod {
 sealed trait Origin
 object Origin {
   case object Manual extends Origin
-  final case class Scrape(listing: ListingKey) extends Origin
+
+  /**
+   * Auto-created from a scraped listing (§6.4, the sub-0.60 band).
+   *
+   * `listing` is OPTIONAL because not every source has a stable listing identity to record. Flipp
+   * is the case that forced this: its item ids change weekly (§2.6 quirk #4), so a `ListingKey`
+   * built from one would be a key that stops matching within days — worse than no key, because it
+   * would look like a strong identity while silently ceasing to resolve. `source` names the scraper
+   * either way, so a provisional product can always be traced to what created it.
+   */
+  final case class Scrape(source: String, listing: Option[ListingKey] = None) extends Origin
   final case class Migration(source: String) extends Origin
 }
 

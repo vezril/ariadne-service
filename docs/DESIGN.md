@@ -119,9 +119,18 @@ is enforced via the resolver index (§6.4), not the aggregate (cross-entity inva
 resolve time, reconciled by merge if a race slips one through — the EventStorming stance: facts
 first, repair explicitly).
 
-**`Origin`** records where a product came from: `Manual` (Calvin), `Scrape(ListingKey)` (auto from
-an unmatched listing), `Migration(source)` (Demeter/Dionysus backfill). Provisional products come
-from `Scrape` and surface in the review queue (§6.5).
+**`Origin`** records where a product came from: `Manual` (Calvin), `Scrape(source, listing)` (auto
+from an unmatched listing), `Migration(source)` (Demeter/Dionysus backfill). Provisional products
+come from `Scrape` and surface in the review queue (§6.5).
+
+**REVISED 2026-09-05** (wiring the scrape run into the runtime): `Scrape` was `Scrape(ListingKey)`,
+which assumed every scraper has a stable listing identity to record. Flipp does not — §2.6 quirk #4
+— and `ListingKey` additionally requires a `StoreId` that a regional flyer observation never has
+(§2.3.1). The shape is now `Scrape(source: String, listing: Option[ListingKey])`: the scraper is
+always named, the listing key is recorded only where one genuinely exists. The alternative —
+synthesising a store id to satisfy the type — would have fabricated exactly the precision §2.3.1
+exists to refuse, and would have looked like strong identity while silently ceasing to match within
+days.
 
 ### 2.2 Store — the individual franchise
 
@@ -693,6 +702,39 @@ forked):
 
 Thresholds are config, not code; tune against the review queue's accept-rate.
 
+#### 6.4.1 Path A, as wired (2026-09-05)
+
+`ResolutionService.resolveForScrape` is the whole of Path A, and its three branches are
+deliberately not symmetric:
+
+- **Matched** → observe against the product.
+- **Ambiguous** (0.60–0.92) → open the review case, observe NOTHING. A human decides.
+- **NoMatch** (< 0.60) → **not** a review case. Mint a Provisional product and let prices flow.
+
+The distinction that took a moment to see clearly: **ambiguity is a QUESTION** (two products might
+be this one) while **absence is an ANSWER** (none of them are). Only the question needs a human. A
+review queue full of "here is a thing you have never seen" is a queue nobody works, and the price
+facts would be held hostage behind it.
+
+Two hazards this created, and what closes them:
+
+1. **Duplicate provisionals.** The provisional's id is DERIVED from the normalised subject (GTIN
+   first, else normalised name+brand), not random. Two things would otherwise duplicate: one run
+   meeting the same name twice, and — because the match index is eventually consistent — the next
+   run reaching the resolver before the product it just created is visible to it. A random id turns
+   both into a fresh product every time, which is precisely the catalog-of-duplicates outcome the
+   resolver exists to prevent. A second register under the same id is refused by the aggregate, and
+   that refusal is the SUCCESS case.
+2. **Nameless listings.** A blank `rawName` would mint one provisional that every nameless item in
+   the corpus falls into — a single product accumulating unrelated prices, reading as a real product
+   with a very busy history. Refused at the mapper, before the price is even looked at, under its
+   own counted reason (`Nameless`).
+
+Because the entity's refusal reply carries only a message string (the serialization trade-off
+recorded in §3), a refusal cannot be told from a genuine failure by its type. So the refusal path
+**verifies** — it re-reads the product and confirms it exists — rather than assuming. Assuming would
+attribute prices to a product that was never created.
+
 ### 6.5 Human review — ariadne-ui's reason to exist
 
 The review queue (ResolutionCase aggregate → review-queue projection → REST) offers four verbs:
@@ -956,5 +998,10 @@ listed, on Ariadne's side, ahead of the build order rather than discovered durin
    limit/bot-wall handling, and the merchant re-stamp; **raw-archive + replay from day one**;
    §2.6 + `migration-demeter.md`). The shared text-lib blocker is **cleared** — §10.5 is decided
    (Ariadne owns it, embedded in `core`), so the normaliser is built in step 3, not stubbed.
+   **DONE 2026-09-05, including the runtime wiring** — real Pekko-HTTP transport, one
+   `ShardedDaemonProcess` scheduler per configured source, `ariadne.scrape` config, and the
+   §6.4 Path A resolution loop (see §6.4.1). **Disabled by default**, which is a decision rather
+   than caution: enabling it points a scraper at a live, undocumented, bot-walled third-party
+   endpoint, and that should be an explicit act in the environment that means to do it.
 9. Purchase v1 (manual) + the price-append process manager.
 10. Migrations per `migration-demeter.md` / `migration-dionysus.md`.

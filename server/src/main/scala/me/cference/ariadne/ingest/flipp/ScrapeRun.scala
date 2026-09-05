@@ -34,7 +34,7 @@ final class ScrapeRun(
     fetcher: PoliteFetcher,
     archive: RawArchive,
     ledger: PostgresFlyerLedger,
-    resolve: MatchSubject => Future[Option[ProductId]],
+    resolve: (MatchSubject, String) => Future[Option[ProductId]],
     observe: (ProductId, FlippMapper.Observation) => Future[Unit],
     priceConfidence: Confidence = Confidence.Certain,
     sizeConfidence: Confidence = Confidence.Certain
@@ -118,7 +118,9 @@ final class ScrapeRun(
                 )
                 markFetched(flyer, archived, now).map(_ => afterDecode)
               case Some(chain) =>
-                sequentially(owned, afterDecode)((r, item) => observeItem(item, chain, source, r))
+                sequentially(owned, afterDecode)((r, item) =>
+                  observeItem(item, chain, source, archived.id, r)
+                )
                   .flatMap(r => markFetched(flyer, archived, now).map(_ => r))
             }
         }
@@ -129,12 +131,14 @@ final class ScrapeRun(
       item: FlyerItem,
       chain: ChainId,
       source: ScrapeSource,
+      rawResponseId: Long,
       report: ScrapeReport
-  ): Future[ScrapeReport] =
-    FlippMapper.map(item, chain, source.postal, priceConfidence, sizeConfidence) match {
+  ): Future[ScrapeReport] = {
+    val provenance = FlippMapper.Provenance(source.name, rawResponseId)
+    FlippMapper.map(item, chain, source.postal, provenance, priceConfidence, sizeConfidence) match {
       case Left(reason) => Future.successful(report.skip(reason))
       case Right(obs) =>
-        resolve(obs.subject).flatMap {
+        resolve(obs.subject, source.name).flatMap {
           // Ambiguous or unresolved identity does NOT become a price fact here. The
           // resolver parks it against a review case instead; attributing a price to a
           // guessed product is the one thing the whole resolver exists to prevent.
@@ -145,6 +149,7 @@ final class ScrapeRun(
             )
         }
     }
+  }
 
   private def markFetched(flyer: Flyer, archived: ArchivedResponse, now: Instant): Future[Unit] =
     ledger.markFetched(flyer.id, flyer.validFrom, flyer.validTo, archived.id, now)
