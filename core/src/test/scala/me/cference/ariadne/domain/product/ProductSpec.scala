@@ -35,7 +35,7 @@ final class ProductSpec extends AnyFunSuite with Matchers {
   test("a scraped product is born Provisional — unreviewed, and it must show that") {
     // Provenance decides trust. An auto-created product entering the catalog as
     // Active would launder a guess into a confirmed fact.
-    val s = existing(Origin.Scrape(listing))
+    val s = existing(Origin.Scrape("flipp", Some(listing)))
     s match {
       case ProductState.Existing(_, _, _, _, _, _, _, _, status) =>
         status shouldBe ProductStatus.Provisional
@@ -115,7 +115,7 @@ final class ProductSpec extends AnyFunSuite with Matchers {
           None,
           None,
           None,
-          Origin.Scrape(listing),
+          Origin.Scrape("flipp", Some(listing)),
           ProductStatus.Provisional
         ),
         ProductEvent.ProductAbsorbed(other, Set(gtin), Set("beurre"), Set(listing))

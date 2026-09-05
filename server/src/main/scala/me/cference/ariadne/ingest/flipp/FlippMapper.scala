@@ -15,6 +15,15 @@ import me.cference.ariadne.domain.resolution.MatchSubject
  */
 object FlippMapper {
 
+  /**
+   * Which scraper read which archived bytes.
+   *
+   * The two travel together as one value on purpose: `PriceSource.Scrape` needs both, and passing
+   * them separately through the run is an invitation to pair the right id with the wrong scraper —
+   * a mismatch nothing downstream could detect, because both halves would look perfectly valid.
+   */
+  final case class Provenance(scraper: String, rawResponseId: Long)
+
   /** What a mapped item becomes: everything needed to observe a price, except the product. */
   final case class Observation(
       subject: MatchSubject,
@@ -22,7 +31,15 @@ object FlippMapper {
       scope: PriceScope,
       observedAt: java.time.Instant,
       priceConfidence: Confidence,
-      sizeConfidence: Confidence
+      sizeConfidence: Confidence,
+      /**
+       * Where this price came from.
+       *
+       * Carried on the observation rather than looked up later, because `PriceSource.Scrape`
+       * REQUIRES it (§2.6): a scraped fact that cannot name the bytes it came from is a fact that
+       * cannot be re-derived when the decoder turns out to have been wrong.
+       */
+      provenance: Provenance
   )
 
   /**
@@ -39,28 +56,32 @@ object FlippMapper {
       item: FlyerItem,
       chain: ChainId,
       postal: PostalCode,
+      provenance: Provenance,
       priceConfidence: Confidence,
       sizeConfidence: Confidence
   ): Either[SkipReason, Observation] =
-    item.currentPrice match {
-      case None => Left(SkipReason.NoPrice)
-      case Some(flipp) =>
-        Money.cad(BigDecimal(flipp.cents) / 100) match {
-          // Money refuses non-positive, which for a flyer means a genuine 0.00.
-          case Left(_) => Left(SkipReason.ZeroPriced)
-          case Right(money) =>
-            Right(
-              Observation(
-                // rawName, not the split name: the bilingual split is the matcher's
-                // business and the decoder deliberately leaves `name` empty.
-                subject = MatchSubject(name = item.rawName),
-                price = money,
-                scope = scopeFor(chain, postal),
-                observedAt = item.validFrom,
-                priceConfidence = priceConfidence,
-                sizeConfidence = sizeConfidence
+    if item.rawName.trim.isEmpty then Left(SkipReason.Nameless)
+    else
+      item.currentPrice match {
+        case None => Left(SkipReason.NoPrice)
+        case Some(flipp) =>
+          Money.cad(BigDecimal(flipp.cents) / 100) match {
+            // Money refuses non-positive, which for a flyer means a genuine 0.00.
+            case Left(_) => Left(SkipReason.ZeroPriced)
+            case Right(money) =>
+              Right(
+                Observation(
+                  // rawName, not the split name: the bilingual split is the matcher's
+                  // business and the decoder deliberately leaves `name` empty.
+                  subject = MatchSubject(name = item.rawName),
+                  price = money,
+                  scope = scopeFor(chain, postal),
+                  observedAt = item.validFrom,
+                  priceConfidence = priceConfidence,
+                  sizeConfidence = sizeConfidence,
+                  provenance = provenance
+                )
               )
-            )
-        }
-    }
+          }
+      }
 }

@@ -23,6 +23,16 @@ enum SkipReason(val label: String) {
    */
   case ZeroPriced extends SkipReason("zero-priced (contract or promotional)")
 
+  /**
+   * No usable name at all.
+   *
+   * Nothing downstream can identify a product from an empty string: the matcher scores TEXT, and a
+   * provisional minted from "" would be one bucket every nameless item in the corpus falls into — a
+   * single product accumulating unrelated prices, which reads as a real product with a very busy
+   * price history.
+   */
+  case Nameless extends SkipReason("no usable name")
+
   /** The resolver could not identify the product and no provisional was created. */
   case Unresolved extends SkipReason("identity unresolved")
 

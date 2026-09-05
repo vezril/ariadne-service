@@ -154,7 +154,7 @@ final class ProductEntitySpec
             None,
             None,
             None,
-            Origin.Scrape(ListingKey(StoreId("s-1"), "e-1")),
+            Origin.Scrape("flipp", Some(ListingKey(StoreId("s-1"), "e-1"))),
             cid
           ),
           _
