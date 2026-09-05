@@ -579,8 +579,20 @@ moves here, insight re-points to this RPC — a required migration consumer, see
 ### REST + `/docs`
 
 A **small REST surface exists for the browser** (constellation rule: gRPC = internal, REST =
-browser/BFF), serving **ariadne-ui only**: the review queue (list/confirm/reject/merge/split),
-product CRUD + search, manual purchase entry, manual price entry. It is a thin mirror of the same
+browser/BFF), serving **ariadne-ui AND dionysus-planner**: the review queue
+(list/confirm/reject/merge/split), product CRUD + search + resolve, the store surface (§7.2),
+manual purchase entry, manual price entry.
+
+**RULED 2026-09-05 (Calvin, directly).** §9's table put Dionysus on gRPC; dionysus-planner relayed
+that REST was wanted, and the two could not both be right. The rule that decides it: a Next.js BFF
+is server-side but is still a BFF, and the blocked-and-waiting argument in §9 is about **latency
+shape, not protocol** — REST over the same read models satisfies it. gRPC stays the surface for
+Demeter and demeter-insight, and its first build (step 5, still unbuilt) can now wait for the
+Lexicon contract to settle rather than being shaped by whoever needed it first.
+
+The consequence to keep in view: this surface now has **two consumers**, so the OpenAPI document is
+a published contract rather than an affordance Ariadne can change freely. That is what the drift
+gate (`OpenApiDriftSpec`) is guarding, and why it fails closed. It is a thin mirror of the same
 commands/queries — generated from the same Lexicon contract, no second behavior. With it, per the
 Apollo v0.13.0 precedent: **self-hosted Swagger `/docs`** (OpenAPI on-classpath, zero
 CDN/egress), and the maintained **Insomnia collection** covering every REST endpoint. `/health`
@@ -862,15 +874,37 @@ The caller mints the `PurchaseId`, which is what makes the retry addressable at 
 ("Metro", "IGA"); Ariadne needs a `StoreId`. Same ambiguity the resolver exists for, but over a
 handful of rows rather than a catalogue, so an alias table is likely to beat the fuzzy matcher.
 
-### 7.2 GAP — there is no store surface
+### 7.2 The store surface — CLOSED 2026-09-05
 
-**Flagged by dionysus-planner, 2026-09-01, and confirmed: `CatalogRoutes` exposes `storeId` only as
-a query parameter. Nothing lists, resolves or registers a store.** The `StoreEntity` and the
-`stores`/`store_coverage` projections exist; no HTTP reaches them.
+**Was a gap.** Flagged by dionysus-planner 2026-09-01 and confirmed: `CatalogRoutes` exposed
+`storeId` only as a query parameter, so nothing listed, resolved or registered a store. The
+`StoreEntity` and the `stores`/`store_coverage` projections existed; no HTTP reached them. The
+receipt migration could not proceed without it.
 
-The receipt migration cannot happen without it — resolving typed text to a franchise, registering
-one that does not exist, and populating an inline picker. Recorded as a dependency neither side had
-listed, on Ariadne's side, ahead of the build order rather than discovered during it.
+Now built: `GET /api/v1/stores` (filter by chain/area/active), `GET /api/v1/stores/{id}`,
+`GET /api/v1/stores/resolve?q=&area=`, `POST /api/v1/stores`.
+
+**Resolution NEVER picks, and that is the whole design of it.** A receipt says "Metro", and §2.2
+made the individual franchise the Store — so "Metro" names a CHAIN, and the ordinary case is that
+the text matches several franchises correctly and none of them uniquely. Auto-picking would
+attribute a purchase to a specific franchise on no evidence at all: the same class of error §2.3.1
+refuses for prices, arriving through the back door of a receipt. The response therefore states
+`unique` as a FIELD rather than leaving a caller to infer it from a list of length one, which would
+turn a coincidence into certainty.
+
+Scoring runs in memory over the store rows rather than in SQL — §7.1's own reasoning, a handful of
+rows rather than a catalogue. That stops being true somewhere in the hundreds, at which point this
+wants the same pg_trgm treatment `match_index` gets; the repository call is already bounded so the
+change is contained.
+
+Registration derives a stable id from chain+area+name when the caller gives none, for the same
+reason provisional product ids are derived (§6.4.1): a receipt flow has no id to offer, and a retry
+— a dropped response, a double tap on a picker — must land on the store it already created. A
+duplicate is 409 carrying that id, so a retry is answerable without a lookup.
+
+**Still open:** an alias table (§7.1's suggestion). Normalisation handles case and spacing drift but
+not genuine aliases — "Metro Plus" for Metro, "Super C" as its own banner. Worth building when the
+candidate lists prove insufficient against real receipts, not before.
 
 ## 8. Cross-cutting
 
@@ -906,6 +940,7 @@ listed, on Ariadne's side, ahead of the build order rather than discovered durin
 | New-product / merge awareness (both consumers, optional) | **Hermes** `product.registered` | reaction |
 | Future budgeting | **Hermes** `purchase.recorded` (+ gRPC ListPurchases) | reaction (+ pull) |
 | ariadne-ui | **REST** (+ self-hosted `/docs`, Insomnia collection) | browser/BFF rule |
+| dionysus-planner (its BFF, server-side) | **REST** — RULED 2026-09-05 (§4) | a BFF is a BFF; blocked-and-waiting is latency shape, not protocol |
 | Scraper → Ariadne | in-process (the policy lives inside Ariadne) | facts belong with facts |
 
 ## 10. Open questions (tracked, not blocking)

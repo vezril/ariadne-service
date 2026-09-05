@@ -4,9 +4,13 @@ info:
   description: |
     The browser-facing surface of the constellation's Product Catalog.
 
-    **REST is for ariadne-ui only.** Service-to-service traffic uses gRPC (`ariadne.v1`, contract
-    in the Lexicon). This surface is a thin mirror of the same queries and commands — there is no
-    second behaviour behind it.
+    **Two consumers: ariadne-ui and dionysus-planner** (Calvin, 2026-09-05). A Next.js BFF is
+    server-side but is still a BFF, and the constellation's REST-for-BFF rule wins over the
+    blocked-and-waiting one — the latter is about latency shape, not protocol. gRPC (`ariadne.v1`,
+    contract in the Lexicon) remains the surface for Demeter and demeter-insight.
+
+    This surface is a thin mirror of the same queries and commands — there is no second behaviour
+    behind it.
 
     Reads hit **projections**, never entities: CQRS is held strictly, so a recovering aggregate
     cannot stall a page load.
@@ -18,6 +22,8 @@ tags:
     description: Product identity and prices.
   - name: review
     description: The identity-resolution review queue — hot spot #1's human backstop.
+  - name: stores
+    description: Individual franchises (§2.2) — list, resolve typed receipt text, register.
 paths:
   /api/v1/products/{id}:
     get:
@@ -41,6 +47,29 @@ paths:
         - { name: limit, in: query, required: false, schema: { type: integer, default: 20 } }
       responses:
         "200": { description: Matches, content: { application/json: { schema: { $ref: "#/components/schemas/Products" } } } }
+  /api/v1/products/resolve:
+    post:
+      tags: [catalog]
+      summary: Resolve a subject to a product (§6.4 Path B)
+      description: |
+        The interactive resolve: a Dionysus ingredient, a scanned barcode, a typed line.
+
+        **All three outcomes are 200.** A `no_match` is an ANSWER — the catalogue genuinely does not
+        know this product — and reporting it as 404 would make a correct reply indistinguishable
+        from a broken request.
+
+        This path NEVER auto-creates a product. The scraper's path does (a provisional, so prices
+        flow), but here a human is present and §6.4 says they register deliberately instead.
+
+        On `ambiguous` a review case has been opened and `caseId` is the handle to confirm against
+        once the human picks. The id is derived from the subject, so it is the SAME case a scrape of
+        the same subject would open rather than a parallel one.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ResolveProduct" } } }
+      responses:
+        "200": { description: The outcome, content: { application/json: { schema: { $ref: "#/components/schemas/ProductResolution" } } } }
+        "400": { description: Neither name nor gtin supplied, or half a listing key, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /api/v1/products/{id}/price:
     get:
       tags: [catalog]
@@ -120,6 +149,60 @@ paths:
         "202": { description: Accepted }
         "400": { description: listingStoreId, listingExternalId and productId required }
         "409": { description: The case is already decided }
+  /api/v1/stores:
+    get:
+      tags: [stores]
+      summary: List franchises
+      description: |
+        Every filter is optional. Deactivated stores are excluded unless `includeInactive` is set —
+        a closed franchise keeps its row, because purchases recorded there still have to render.
+      parameters:
+        - { name: chainId, in: query, required: false, schema: { type: string } }
+        - { name: area, in: query, required: false, schema: { type: string } }
+        - { name: includeInactive, in: query, required: false, schema: { type: boolean, default: false } }
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 100 } }
+      responses:
+        "200": { description: Franchises, content: { application/json: { schema: { $ref: "#/components/schemas/Stores" } } } }
+    post:
+      tags: [stores]
+      summary: Register a franchise
+      description: |
+        `id` is optional. A receipt flow has none to offer, so the server derives a stable one from
+        chain+area+name — a retry must land on the store it already created rather than register a
+        second one. A duplicate is therefore 409, carrying the id the caller wanted.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/RegisterStore" } } }
+      responses:
+        "202": { description: Accepted, content: { application/json: { schema: { $ref: "#/components/schemas/Accepted" } } } }
+        "400": { description: Missing name, chainId or area, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: Already registered, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /api/v1/stores/resolve:
+    get:
+      tags: [stores]
+      summary: Resolve typed receipt text to franchises (§7.1)
+      description: |
+        **This never picks.** A receipt says "Metro", and "Metro" is a CHAIN — §2.2 made the
+        individual franchise the Store, so the ordinary case is that the text matches several
+        stores correctly and none uniquely. Auto-picking would attribute a purchase to a specific
+        franchise on no evidence.
+
+        `unique` is stated explicitly rather than left to be inferred from a list of length one, so
+        a caller cannot mistake a coincidence for certainty.
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string } }
+        - { name: area, in: query, required: false, schema: { type: string, description: Narrow to one flyer region } }
+      responses:
+        "200": { description: Ranked candidates, content: { application/json: { schema: { $ref: "#/components/schemas/StoreResolution" } } } }
+  /api/v1/stores/{id}:
+    get:
+      tags: [stores]
+      summary: Fetch a franchise by id
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: The franchise, content: { application/json: { schema: { $ref: "#/components/schemas/Store" } } } }
+        "404": { description: No such store, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /health:
     get:
       summary: Liveness and readiness
@@ -189,6 +272,72 @@ components:
         loser: { type: string, nullable: true }
         listingStoreId: { type: string, nullable: true }
         listingExternalId: { type: string, nullable: true }
+    Store:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        chainId: { type: string, description: The rollup axis — what a regional flyer price speaks for }
+        area: { type: string, description: Flyer-coverage region (an FSA for Flipp sources) }
+        label: { type: string, nullable: true }
+        active: { type: boolean }
+    Stores:
+      type: object
+      properties:
+        stores: { type: array, items: { $ref: "#/components/schemas/Store" } }
+    StoreResolution:
+      type: object
+      properties:
+        query: { type: string }
+        unique:
+          type: boolean
+          description: True only when the text genuinely narrowed to one franchise. Never infer this from the list length.
+        matches:
+          type: array
+          items:
+            type: object
+            properties:
+              store: { $ref: "#/components/schemas/Store" }
+              score: { type: number, format: double }
+              why: { type: string, description: Whether the chain or the store name matched }
+    RegisterStore:
+      type: object
+      required: [name, chainId, area]
+      properties:
+        id: { type: string, nullable: true, description: Omit to have a stable one derived from chain+area+name }
+        name: { type: string }
+        chainId: { type: string }
+        area: { type: string }
+        label: { type: string, nullable: true }
+    ResolveProduct:
+      type: object
+      properties:
+        name: { type: string }
+        brand: { type: string, nullable: true }
+        gtin: { type: string, nullable: true }
+        storeId: { type: string, nullable: true, description: With externalId, forms a listing key — supply both or neither }
+        externalId: { type: string, nullable: true }
+    ProductResolution:
+      type: object
+      properties:
+        outcome: { type: string, enum: [matched, ambiguous, no_match] }
+        productId: { type: string, nullable: true, description: Set on `matched` }
+        confidence: { type: number, format: double, nullable: true }
+        method: { type: string, nullable: true, enum: [Gtin, Listing, Fuzzy, Human] }
+        caseId: { type: string, nullable: true, description: Set on `ambiguous` — the review case to confirm against }
+        candidates:
+          type: array
+          items:
+            type: object
+            properties:
+              productId: { type: string }
+              score: { type: number, format: double }
+              notes: { type: array, items: { type: string } }
+    Accepted:
+      type: object
+      properties:
+        id: { type: string }
+        status: { type: string }
     Error:
       type: object
       properties:
