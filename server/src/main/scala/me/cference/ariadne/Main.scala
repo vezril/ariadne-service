@@ -8,11 +8,13 @@ import me.cference.ariadne.http.{
   HealthRoutes,
   HelloRoutes,
   HttpServer,
-  ReviewRoutes
+  ReviewRoutes,
+  StoreRoutes
 }
 import me.cference.ariadne.config.ScrapeConfig
-import me.cference.ariadne.domain.CorrelationId
+import me.cference.ariadne.domain.{CorrelationId, StoreId}
 import me.cference.ariadne.domain.price.{PriceCommand, PriceSource}
+import me.cference.ariadne.domain.store.StoreCommand
 import me.cference.ariadne.domain.resolution.{ResolutionCommand, ResolutionId}
 import me.cference.ariadne.ingest.PostgresRawArchive
 import me.cference.ariadne.ingest.flipp.{
@@ -31,10 +33,11 @@ import me.cference.ariadne.persistence.{
   PriceStreamEntity,
   ResolutionCaseEntity,
   SchemaMigration,
-  Sharding
+  Sharding,
+  StoreEntity
 }
 import me.cference.ariadne.projection.{AriadneProjections, ReadModelRepository}
-import me.cference.ariadne.resolver.{ResolutionService, Resolver}
+import me.cference.ariadne.resolver.{ResolutionService, Resolver, StoreResolver}
 import io.r2dbc.postgresql.{PostgresqlConnectionConfiguration, PostgresqlConnectionFactory}
 import org.apache.pekko.Done
 import org.apache.pekko.util.Timeout
@@ -90,15 +93,32 @@ object Main:
             Left(e.getMessage)
           }
 
-    startScraping(cfg.scrape, repo)
+    val storeDecide: (StoreId, StoreCommand) => Future[Either[String, Unit]] =
+      (id, cmd) =>
+        Sharding
+          .store(system, id)
+          .askWithStatus[Done](StoreEntity.Execute(cmd, _))
+          .map(_ => Right(()))
+          .recover { case e: org.apache.pekko.pattern.StatusReply.ErrorMessage =>
+            Left(e.getMessage)
+          }
+
+    // One ResolutionService for both callers. The scrape run uses `resolveForScrape`
+    // (Path A: auto-create on NoMatch); the REST surface uses `resolveAndReview`
+    // (Path B: never auto-create — a human is right there, and §6.4 says they register
+    // deliberately). Same matcher, same case ids, different policy on absence.
+    val resolution = new ResolutionService(new Resolver(repo), system)
+
+    startScraping(cfg.scrape, resolution)
 
     // Readiness flips UP once the server is bound; withdrawn first on shutdown.
     val readiness = new AtomicBoolean(false)
     val routes =
       HelloRoutes() ~
         HealthRoutes(BuildInfo.version, () => readiness.get()) ~
-        new CatalogRoutes(repo).routes ~
+        new CatalogRoutes(repo, resolution.resolveAndReview).routes ~
         new ReviewRoutes(repo, decide).routes ~
+        new StoreRoutes(repo, new StoreResolver(repo), storeDecide).routes ~
         new DocsRoutes().routes
 
     HttpServer.bind(routes, cfg.http.host, cfg.http.port).onComplete {
@@ -127,7 +147,7 @@ object Main:
    * configured there is no fetcher, no rate limiter and no timer. A service that merely *could*
    * scrape should not hold a client pointed at a third-party endpoint.
    */
-  private def startScraping(cfg: ScrapeConfig, repo: ReadModelRepository)(using
+  private def startScraping(cfg: ScrapeConfig, resolution: ResolutionService)(using
       system: ActorSystem[?],
       timeout: Timeout
   ): Unit =
@@ -147,8 +167,6 @@ object Main:
         RateLimiter(policy.rateLimit, policy.rateWindow, system),
         system
       )
-      val resolution = new ResolutionService(new Resolver(repo), system)
-
       val run = new ScrapeRun(
         fetcher = fetcher,
         archive = new PostgresRawArchive(cf),

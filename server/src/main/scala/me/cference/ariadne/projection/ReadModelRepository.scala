@@ -422,6 +422,49 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
         )
     )(Integer.valueOf(limit))
 
+  // ------------------------------------------------------------- store reads
+
+  /**
+   * One franchise by id.
+   *
+   * Deactivated stores are RETURNED, not hidden. A purchase recorded at a store that has since
+   * closed still has to render, and a 404 on a store the catalogue plainly remembers would make
+   * historical receipts unreadable (§2.2). Filtering the closed ones is a listing concern.
+   */
+  def getStore(id: String): Future[Option[StoreRow]] =
+    query(
+      "SELECT id, name, chain_id, area, label, active FROM stores WHERE id = $1",
+      storeRow
+    )(id).map(_.headOption)
+
+  /**
+   * The franchises matching a filter, name-ordered.
+   *
+   * Every filter is optional and applied with a NULL-means-any predicate rather than by assembling
+   * SQL, so there is one statement and one plan whatever the caller asks for — and no string
+   * concatenation anywhere near a query.
+   */
+  def listStores(
+      chainId: Option[String] = None,
+      area: Option[String] = None,
+      activeOnly: Boolean = true,
+      limit: Int = 100
+  ): Future[List[StoreRow]] =
+    query(
+      """SELECT id, name, chain_id, area, label, active FROM stores
+         WHERE ($1::text IS NULL OR chain_id = $1)
+           AND ($2::text IS NULL OR area = $2)
+           AND ($3::boolean IS FALSE OR active IS TRUE)
+         ORDER BY chain_id, name, id
+         LIMIT $4""",
+      storeRow
+    )(
+      chainId.orNull,
+      area.orNull,
+      java.lang.Boolean.valueOf(activeOnly),
+      Integer.valueOf(limit)
+    )
+
   def getProduct(id: String): Future[Option[ProductRow]] =
     query(
       """SELECT id, name, brand, category, size_amount, size_unit, status, merged_into
@@ -459,6 +502,16 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
       Option(r.get(5, classOf[String])),
       r.get(6, classOf[String]),
       Option(r.get(7, classOf[String]))
+    )
+
+  private val storeRow: Row => StoreRow = r =>
+    StoreRow(
+      r.get(0, classOf[String]),
+      r.get(1, classOf[String]),
+      r.get(2, classOf[String]),
+      r.get(3, classOf[String]),
+      Option(r.get(4, classOf[String])),
+      r.get(5, classOf[java.lang.Boolean]).booleanValue
     )
 
   // ------------------------------------------------------------------ plumbing
@@ -583,6 +636,16 @@ object ReadModelRepository {
       sizeUnit: Option[String],
       status: String,
       mergedInto: Option[String]
+  )
+
+  /** An individual franchise (§2.2) — `chainId` is the rollup axis, `area` the flyer region. */
+  final case class StoreRow(
+      id: String,
+      name: String,
+      chainId: String,
+      area: String,
+      label: Option[String],
+      active: Boolean
   )
 
   /** One shortlist entry, as stored — the scorer re-derives everything else. */

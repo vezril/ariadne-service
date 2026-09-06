@@ -41,6 +41,76 @@ collection:
         description: >-
           Resolves exact-over-area. The `scope` field says whether the number came from a
           store-specific observation or the chain's flyer for that region.
+      - name: Resolve a product
+        meta: { id: req_resolve_product, sortKey: -7 }
+        method: POST
+        url: "{{ _.base }}/api/v1/products/resolve"
+        body:
+          mimeType: application/json
+          text: |-
+            {
+              "name": "Lactantia salted butter 454g",
+              "brand": "Lactantia"
+            }
+        headers:
+          - { name: Content-Type, value: application/json }
+          - { name: X-Correlation-Id, value: "{{ _.correlationId }}" }
+        description: >-
+          Path B of the resolver (interactive). All three outcomes are 200 — a `no_match` is an
+          answer, not an error. This path never auto-creates a product; on `ambiguous` a review
+          case is opened and `caseId` is what you confirm against.
+  - name: stores
+    meta: { id: fld_stores, sortKey: -2.5 }
+    children:
+      - name: List stores
+        meta: { id: req_list_stores, sortKey: -10 }
+        method: GET
+        url: "{{ _.base }}/api/v1/stores"
+        parameters:
+          - { name: chainId, value: "", disabled: true }
+          - { name: area, value: "", disabled: true }
+          - { name: includeInactive, value: "false" }
+          - { name: limit, value: "100" }
+        headers:
+          - { name: Accept, value: application/json }
+      - name: Get store
+        meta: { id: req_get_store, sortKey: -9 }
+        method: GET
+        url: "{{ _.base }}/api/v1/stores/{{ _.storeId }}"
+        headers:
+          - { name: Accept, value: application/json }
+      - name: Resolve store text
+        meta: { id: req_resolve_store, sortKey: -8 }
+        method: GET
+        url: "{{ _.base }}/api/v1/stores/resolve"
+        parameters:
+          - { name: q, value: Metro }
+          - { name: area, value: "", disabled: true }
+        headers:
+          - { name: Accept, value: application/json }
+        description: >-
+          Turns a receipt's typed store text into candidate franchises. It never picks: "Metro"
+          names a chain, and every franchise of that chain is equally consistent with it. Check
+          `unique` rather than the length of `matches`.
+      - name: Register a store
+        meta: { id: req_register_store, sortKey: -7 }
+        method: POST
+        url: "{{ _.base }}/api/v1/stores"
+        body:
+          mimeType: application/json
+          text: |-
+            {
+              "name": "IGA Beaubien",
+              "chainId": "iga",
+              "area": "H2X",
+              "label": "Beaubien & Papineau"
+            }
+        headers:
+          - { name: Content-Type, value: application/json }
+          - { name: X-Correlation-Id, value: "{{ _.correlationId }}" }
+        description: >-
+          Omit `id` and a stable one is derived from chain+area+name, so a retry lands on the
+          store it already created instead of registering a second franchise.
   - name: review queue
     meta: { id: fld_review, sortKey: -2 }
     children:

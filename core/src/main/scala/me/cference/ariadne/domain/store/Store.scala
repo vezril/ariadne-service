@@ -7,8 +7,11 @@ package store
  * Deliberately boring. Stores are also where scraper source config attaches (which Flipp merchant
  * maps to which StoreId) — but that is config, not domain state, and does not live here.
  *
- * §10.3 is open on granularity: v1 is chain-level with an optional location, revisited when
- * per-location pricing starts to hurt.
+ * Granularity RESOLVED (§10.3, 2026-08-28): the Store is the individual FRANCHISE, and `chain` is
+ * the rollup axis. A single IGA can run a sale no other IGA has, which the chain-level model could
+ * not express. The larger half of that change is §2.3.1: a flyer feed cannot name a franchise, so a
+ * scraped price is an `Area(chain, region)` fact fanned out at READ time — never one row per store
+ * at write time, which would fabricate precision.
  */
 enum StoreState {
   case Empty
