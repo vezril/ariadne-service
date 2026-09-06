@@ -1,0 +1,117 @@
+package me.cference.ariadne.domain
+
+/**
+ * Identifiers and the small shared value types every aggregate leans on.
+ *
+ * All ids are opaque-ish wrappers over String (ULIDs in practice). They are deliberately dumb: the
+ * catalog owns identity, and identity is a name for a thing, not a place to hang behaviour.
+ */
+final case class ProductId(value: String) extends AnyVal
+
+/**
+ * An INDIVIDUAL FRANCHISE, not a banner (§2.2, revised 2026-08-28). "Is IGA running this?" is a
+ * query across a chain's stores, not a row.
+ */
+final case class StoreId(value: String) extends AnyVal
+
+/**
+ * The banner a franchise belongs to — IGA, Metro, Provigo. The rollup axis, and half the identity
+ * of an area-scoped price fact, so it is required rather than an optional label.
+ */
+final case class ChainId(value: String) extends AnyVal
+
+/**
+ * The flyer-coverage region (FSA-shaped postal prefix).
+ *
+ * Flipp scopes every response by postal code, so this is the finest grain a scraped price can
+ * honestly claim — see PriceScope.
+ */
+final case class Area(postalPrefix: String) extends AnyVal
+
+final case class PurchaseId(value: String) extends AnyVal
+
+/**
+ * A retailer's own stable id for a listing — the second strong key (§6.2).
+ *
+ * Once a listing resolves, the link is remembered and every later scrape of that listing
+ * short-circuits the matcher entirely.
+ */
+final case class ListingKey(storeId: StoreId, externalId: String)
+
+/**
+ * Adopted from an incoming edge when present, minted when absent (§8). Journalled on every event
+ * and echoed on every publish.
+ */
+final case class CorrelationId(value: String) extends AnyVal
+
+/**
+ * The matcher revision that produced a link (§6.6).
+ *
+ * Recorded on every `ListingLinked` so a resolver change migrates history deliberately rather than
+ * silently orphaning it — Demeter's `Version="v1"` discipline, carried over.
+ */
+final case class MatcherVersion(value: String) extends AnyVal
+
+/**
+ * A certainty in [0, 1].
+ *
+ * NOTE: distinct from the text package's `SplitConfidence` (Low|Medium|High), which is Demeter's
+ * bilingual-split notion. Same word, different concept — DESIGN §10.5 says explicitly not to unify
+ * them.
+ */
+opaque type Confidence = Double
+
+object Confidence {
+  val Certain: Confidence = 1.0
+
+  def apply(d: Double): Either[DomainError, Confidence] =
+    if d.isNaN then Left(DomainError.InvalidConfidence("NaN"))
+    else if d < 0.0 || d > 1.0 then Left(DomainError.InvalidConfidence(d.toString))
+    else Right(d)
+
+  /** For literals known good at the call site (thresholds, test fixtures). */
+  def unsafe(d: Double): Confidence =
+    apply(d).fold(e => throw new IllegalArgumentException(e.message), identity)
+
+  extension (c: Confidence) {
+    def toDouble: Double = c
+
+    /**
+     * The weakest link — Demeter's `split.confidence.min(sizeConfidence)` coupling (§2.3),
+     * preserved so downstream judgment cannot read too high.
+     */
+    def min(that: Confidence): Confidence = if c <= that then c else that
+  }
+}
+
+/** How a listing came to be linked to a product (§6.4). */
+enum MatchMethod {
+  case Gtin
+  case Listing
+  case Fuzzy
+  case Human
+}
+
+/** Where a product came from (§2.1). */
+sealed trait Origin
+object Origin {
+  case object Manual extends Origin
+
+  /**
+   * Auto-created from a scraped listing (§6.4, the sub-0.60 band).
+   *
+   * `listing` is OPTIONAL because not every source has a stable listing identity to record. Flipp
+   * is the case that forced this: its item ids change weekly (§2.6 quirk #4), so a `ListingKey`
+   * built from one would be a key that stops matching within days — worse than no key, because it
+   * would look like a strong identity while silently ceasing to resolve. `source` names the scraper
+   * either way, so a provisional product can always be traced to what created it.
+   */
+  final case class Scrape(source: String, listing: Option[ListingKey] = None) extends Origin
+  final case class Migration(source: String) extends Origin
+}
+
+/**
+ * A flyer's own claim about a promotion — a FACT, not a judgment. Whether it is a *good deal* is
+ * Demeter's call; the line stays.
+ */
+final case class PromoFlag(description: String, percentOff: Option[BigDecimal])

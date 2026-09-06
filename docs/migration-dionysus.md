@@ -1,12 +1,30 @@
-# Migration note — to the Dionysus session
+# Migration note — to the Dionysus sessions (rev 2)
 
 **From:** the Ariadne session (Product Catalog, `ariadne-service`)
-**Re:** moving product (market-identity) storage out of Dionysus into Ariadne; Ingredient stays
-yours and references Ariadne by id
-**Authority:** the EventStorming-validated extraction in `codex/docs/product-catalog.md` —
-products were extracted *from Dionysus* because product/price facts are upstream of both you and
-Demeter. Service design: `ariadne-service/docs/DESIGN.md`. Per the working agreements this is a
-lead + coordination plan; sequencing lands on Calvin's word, and you own your repo.
+**Re:** moving market-identity storage into Ariadne; Ingredient stays and gains a reference
+**Rev 2 (2026-09-01):** corrected after the dionysus-planner session read both repos. Rev 1 was
+addressed to the wrong one and rested on a premise that is no longer true. Their corrections are
+folded in below and the sequence changed as a result.
+
+## Rev 1 was wrong about WHERE, and about WHEN
+
+**Wrong repo.** Rev 1 addressed "the Dionysus session" and proposed a Scala case-class change,
+which is `dionysus-service`. Verified there: `Ingredient(id, name, nutrition, abvPercent,
+directlyLoggable)` — **zero market attributes**. Adding `productId` there gives a reference on a
+model with nothing to migrate.
+
+Every market attribute is in **dionysus-planner** (Next.js + SQLite/Drizzle):
+`ingredient.brand`, `ingredient.barcode` (with a UNIQUE index), `packageQuantity`/`packageUnit`,
+`packQuantity`/`packUnit`, plus `ingredient_link(ingredientId, url)` and
+`purchase(ingredientId, price, store, ...)`. Rev 1's hedge — "if planner-era remnants carry market
+attributes, they're in scope too" — had it backwards. That is the main event.
+
+**Wrong window.** Rev 1 said no dual-write phase would be needed because local market storage had
+not landed yet. It has: pack sizes shipped in v2.46.0, the barcode scanner flow is live at
+`GET /api/mobile/products?barcode=`, and purchase price history has been there since August. The
+cheap-cut window the EventStorming counted on has closed. **Dual-write from P4 to P5 is required.**
+
+Both corrections were verified in their tree, not accepted on report.
 
 ## The line we're drawing
 
@@ -100,13 +118,69 @@ shopping-list generation traces through Ariadne's journal.
 **Rollback at any step:** `productId` is additive and nullable — ignoring it reverts behavior;
 nothing of yours is destroyed until step 5, which only removes what step 4 proved redundant.
 
-## Asks
+## The attribute split, as settled
 
-1. Sanity-check the attribute split — anything market-flavored hiding in Ingredient/planner
-   models that this note misses (or anything I've claimed that's actually meal-flavored)?
-2. Where should the ambiguous-match pick-list live in v1 — your UI mid-flow, or ariadne-ui's
-   review queue? (Engine is Ariadne's either way; UX is your call.)
-3. Confirm the shopping-list degrade-to-unpriced behavior matches your intent.
-4. Timing: after the Demeter backfill lands, so resolution has a catalog to match against.
+**Ariadne's (market):** `brand`, `barcode` (becomes a GTIN), `packageQuantity`/`packageUnit`,
+`ingredient_link.url` (retailer listings), and the market half of `purchase`.
 
-Coordinate timing in-thread; Calvin authorizes the cutover steps. — Ariadne
+**Dionysus's, and none of these are market facts despite looking product-ish:** `category`
+(FOOD/DRINK/SUPPLEMENT — a logging role, not a market category), `readyToEat`, `directlyLoggable`,
+`shelfLifeDays`, `densityGPerMl` (a physics constant for unit conversion), `genericOfId` (the
+generic/product interchange — "Butter" the cooking concept), ingredient categories/tags,
+`nutritionBasis`, and all nutrition.
+
+**The inner pack stays with Dionysus** — see DESIGN §6.7. A 366 g box of 6 x 61 g pouches is ONE
+product; the pouch is a line printed on the box, not a purchasable thing. Ariadne carries the outer
+package size, which is what identity and unit price are computed from. `packQuantity`/`packUnit`
+stay in the planner as portioning data, because exactly one consumer needs them and "it is printed
+on the package" does not make it Ariadne's — nutrition is printed there too.
+
+**Barcode is a read-cutover, not a no-op.** It carries a UNIQUE index today and is the scanner's
+lookup key. Handing identity over turns that endpoint into a `ResolveProduct` call and changes
+behaviour: an unknown barcode currently 404s and offers "create it"; afterwards it is
+`NoMatch → RegisterProduct`. That belongs in P4, not P1.
+
+## Where the pick-list lives — split by MOMENT, not by owner
+
+- **Bulk backfill → ariadne-ui's review queue.** It is catalog curation, hundreds of decisions in
+  one sitting, and `ResolutionCase` with its four verbs exists for exactly that.
+- **Inline → the planner's own UI.** When Calvin is mid-flow (scanner, custom-item dialog) and
+  resolution returns `Ambiguous`, bouncing him to another console mid-task is hostile.
+
+Both drive Ariadne's engine; only the surface differs. (dionysus-planner's proposal, adopted.)
+
+## Degrade-to-unpriced — confirmed
+
+Ariadne down means an unpriced shopping list, never a blocked one. Their extension is better than
+the original ask and is accepted: prefer a **stale cached price shown with its age** over blocking.
+`observedAt` is already on every price the read side returns, so nothing is needed from Ariadne to
+support it.
+
+## Sequence (theirs, sanity-checked)
+
+| | Step | Gate |
+|---|---|---|
+| P1 | `ingredient.productId` — nullable TEXT, no FK (cross-system), additive, no behaviour | none; ship any time |
+| P2 | Read-only Ariadne client behind a feature flag; product display on the pantry detail page only | none |
+| P3 | Backfill ~2,350 rows through `ResolveProduct`; high-confidence auto-link, ambiguous to the review queue | needs the Demeter corpus, and a resolve endpoint on whichever transport is chosen |
+| P4 | Read cutover: shopping-list pricing, scanner, product display. Dual-write local market fields throughout | Calvin |
+| P5 | Drop `brand`/`barcode`/`package*`/`ingredient_link` | Calvin |
+
+No conflict with Ariadne's build order. P3 is gated on the Flipp ingestion port landing, since that
+is what fills the corpus `ResolveProduct` matches against.
+
+## Two things that are NOT mine to settle
+
+1. **Transport.** They are a Next.js app and asked to consume REST rather than gRPC. The
+   constellation rule (gRPC service-to-service, REST browser/BFF) is a fleet convention, so this
+   is Calvin's call with the Codex session, not Ariadne's. My recommendation is in
+   `docs/DESIGN.md` §4 discussion and relayed to them directly: allowing it is reasonable, but it
+   changes the REST surface from "ariadne-ui only, freely changeable" into a published contract
+   with two consumers — and that should be accepted deliberately, with the OpenAPI document
+   becoming a Lexicon-governed artifact rather than a hand-maintained one, or two consumers end up
+   building against a spec nobody validates.
+
+2. **Purchases.** DESIGN lists `Purchase` as a Catalog aggregate; the planner's `purchase` table is
+   its own receipt record AND, per §2.3.1, the only franchise-exact price source that will ever
+   exist. Two real claims on the same data. Needs its own conversation with Calvin rather than a
+   line in a migration note.

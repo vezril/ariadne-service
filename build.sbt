@@ -41,7 +41,14 @@ ThisBuild / scalacOptions ++= Seq(
 
 lazy val pekkoVersion = "1.2.0"
 lazy val pekkoHttpVersion = "1.2.0"
+// Aligned with apollo-storage so pekko-projection (which pulls pekko 1.2.x /
+// r2dbc 1.1.x) does not create a mixed-version classpath — Pekko forbids that.
+lazy val pekkoR2dbcVersion = "1.1.0"
+lazy val pekkoProjectionVersion = "1.1.0"
+lazy val testcontainersVersion = "0.41.4"
+lazy val circeVersion = "0.14.10"
 lazy val scalaTestVersion = "3.2.19"
+lazy val scalaCheckPlusVersion = "3.2.19.0"
 lazy val logbackVersion = "1.5.16"
 lazy val logstashEncoderVersion = "8.0"
 
@@ -57,7 +64,13 @@ lazy val root = (project in file("."))
 lazy val core = (project in file("core"))
   .settings(
     name := "ariadne-core",
-    libraryDependencies += "org.scalatest" %% "scalatest" % scalaTestVersion % Test
+    libraryDependencies ++= Seq(
+      "org.scalatest" %% "scalatest" % scalaTestVersion % Test,
+      // Property tests for the matching algebra: DESIGN §11 step 3 asks for them by
+      // name, because the normaliser and scorer have invariants (idempotence,
+      // symmetry, a bounded score) that examples cannot cover exhaustively.
+      "org.scalatestplus" %% "scalacheck-1-18" % scalaCheckPlusVersion % Test
+    )
   )
 
 // --- server: Pekko runtime + Main + Docker image. ----------------------------
@@ -68,18 +81,68 @@ lazy val server = (project in file("server"))
     name := "ariadne-server",
     Compile / mainClass := Some("me.cference.ariadne.Main"),
     libraryDependencies ++= Seq(
+      // circe, for the ported Flipp decoders ONLY.
+      //
+      // The service marshals its REST surface with spray-json, so this is a second JSON
+      // library and that deserves a reason. The decoders are ported verbatim from
+      // demeter-service, where they are circe-based and carry leniency rules tuned against
+      // a live upstream that adds fields without notice. Rewriting them onto spray-json
+      // would be precisely the rewrite the port exists to avoid, and it would put the
+      // tuning at risk to save one dependency. Boundary: circe stays inside the ingest
+      // package; nothing else in the service sees it.
+      "io.circe" %% "circe-core" % circeVersion,
+      "io.circe" %% "circe-parser" % circeVersion,
       "org.apache.pekko" %% "pekko-actor-typed" % pekkoVersion,
       "org.apache.pekko" %% "pekko-stream" % pekkoVersion,
       "org.apache.pekko" %% "pekko-http" % pekkoHttpVersion,
       "org.apache.pekko" %% "pekko-http-spray-json" % pekkoHttpVersion,
       "org.apache.pekko" %% "pekko-slf4j" % pekkoVersion,
       "ch.qos.logback" % "logback-classic" % logbackVersion,
+      // Swagger UI served from the CLASSPATH — DESIGN §4 requires self-hosted /docs with
+      // zero CDN egress, so the assets ship in the image rather than being fetched.
+      "org.webjars" % "swagger-ui" % "5.17.14",
       // Structured JSON logs (the constellation log schema — see the add-structured-logging spec).
       "net.logstash.logback" % "logstash-logback-encoder" % logstashEncoderVersion,
+      // --- persistence + read-side projections (DESIGN §2, §3) ---
+      // ShardedDaemonProcess distributes the projection instances; on this
+      // single-node cluster it still provides the supervised, restart-safe runner.
+      "org.apache.pekko" %% "pekko-cluster-typed" % pekkoVersion,
+      "org.apache.pekko" %% "pekko-cluster-sharding-typed" % pekkoVersion,
+      "org.apache.pekko" %% "pekko-persistence-typed" % pekkoVersion,
+      "org.apache.pekko" %% "pekko-serialization-jackson" % pekkoVersion,
+      "org.apache.pekko" %% "pekko-persistence-r2dbc" % pekkoR2dbcVersion,
+      // Explicit since r2dbc 1.1.0 (transitive in 1.0.0).
+      "org.postgresql" % "r2dbc-postgresql" % "1.0.7.RELEASE",
+      "org.apache.pekko" %% "pekko-projection-r2dbc" % pekkoProjectionVersion,
+      "org.apache.pekko" %% "pekko-projection-eventsourced" % pekkoProjectionVersion,
       "org.apache.pekko" %% "pekko-actor-testkit-typed" % pekkoVersion % Test,
+      "org.apache.pekko" %% "pekko-persistence-testkit" % pekkoVersion % Test,
+      "org.apache.pekko" %% "pekko-projection-testkit" % pekkoProjectionVersion % Test,
+      // pekko-projection-testkit 1.1.x pulls pekko-stream-testkit 1.1.3; Pekko forbids a
+      // mixed-version classpath, so pin it to pekkoVersion explicitly.
+      "org.apache.pekko" %% "pekko-stream-testkit" % pekkoVersion % Test,
       "org.apache.pekko" %% "pekko-http-testkit" % pekkoHttpVersion % Test,
-      "org.scalatest" %% "scalatest" % scalaTestVersion % Test
+      "org.scalatest" %% "scalatest" % scalaTestVersion % Test,
+      // Real Postgres for projection tests — a mocked journal would prove nothing
+      // about the SQL these projections actually run.
+      "com.dimafeng" %% "testcontainers-scala-scalatest" % testcontainersVersion % Test,
+      "com.dimafeng" %% "testcontainers-scala-postgresql" % testcontainersVersion % Test,
+      "org.postgresql" % "postgresql" % "42.7.4" % Test
     ),
+    // Serial test execution, deliberately.
+    //
+    // Ten suites use testcontainers, and each starts its OWN Postgres. Run in parallel
+    // that is ten containers competing for the same Docker daemon, which produced a
+    // RestSurfaceSpec failure that passed on re-run — a flaky gate is worse than a slow
+    // one, because it teaches people to re-run rather than read.
+    //
+    // The obvious alternative, one shared container, is NOT safe here as written:
+    // ProjectionHandlersSpec and RestSurfaceSpec both seed product "p-1", so a shared
+    // database would give them genuine cross-talk rather than merely contention. Making
+    // sharing safe needs a schema per suite, which is worth doing when suite time starts
+    // to hurt and is not worth doing to fix a flake.
+    Test / parallelExecution := false,
+
     // BuildInfo exposes the dynver version to the running app (health endpoint).
     buildInfoKeys := Seq[BuildInfoKey](name, version, scalaVersion, sbtVersion),
     buildInfoPackage := "me.cference.ariadne.build",

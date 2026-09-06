@@ -119,41 +119,87 @@ is enforced via the resolver index (§6.4), not the aggregate (cross-entity inva
 resolve time, reconciled by merge if a race slips one through — the EventStorming stance: facts
 first, repair explicitly).
 
-**`Origin`** records where a product came from: `Manual` (Calvin), `Scrape(ListingKey)` (auto from
-an unmatched listing), `Migration(source)` (Demeter/Dionysus backfill). Provisional products come
-from `Scrape` and surface in the review queue (§6.5).
+**`Origin`** records where a product came from: `Manual` (Calvin), `Scrape(source, listing)` (auto
+from an unmatched listing), `Migration(source)` (Demeter/Dionysus backfill). Provisional products
+come from `Scrape` and surface in the review queue (§6.5).
 
-### 2.2 Store
+**REVISED 2026-09-05** (wiring the scrape run into the runtime): `Scrape` was `Scrape(ListingKey)`,
+which assumed every scraper has a stable listing identity to record. Flipp does not — §2.6 quirk #4
+— and `ListingKey` additionally requires a `StoreId` that a regional flyer observation never has
+(§2.3.1). The shape is now `Scrape(source: String, listing: Option[ListingKey])`: the scraper is
+always named, the listing key is recorded only where one genuinely exists. The alternative —
+synthesising a store id to satisfy the type — would have fabricated exactly the precision §2.3.1
+exists to refuse, and would have looked like strong identity while silently ceasing to match within
+days.
 
-Small reference aggregate — a retailer/banner + optional location.
+### 2.2 Store — the individual franchise
+
+**REVISED 2026-08-28** (Calvin, via the dionysus-planner session — resolves the §10.3 open
+question). The v1 answer was "chain-level with optional location, revisit when it hurts." It
+hurts, and here is the requirement that broke it:
+
+> IGA is a chain with many stores. IGA might run a sale on X chain-wide, but a *specific
+> franchise* might run a sale on Y that no other IGA has.
+
+So **the anchor inverts: a `Store` IS an individual franchise**, and `chain` becomes the grouping
+attribute you roll up by. "Is IGA running this?" stops being a row and becomes a query across a
+chain's stores. Explicitly **out of scope**: opening hours, addresses, geo, and the rest of the
+store-logistics dimension — Calvin does not want them and they are not market facts.
 
 ```scala
-final case class StoreId(value: String)
-final case class StoreState(id: StoreId, name: String, chain: Option[String],
-                            location: Option[String], active: Boolean)
+final case class StoreId(value: String)   // an individual franchise
+final case class ChainId(value: String)   // the banner: IGA, Metro, Provigo
+final case class Area(postalPrefix: String)  // the flyer-coverage region (FSA-shaped)
+
+final case class StoreState(id: StoreId, name: String, chain: ChainId,
+                            area: Area, label: Option[String], active: Boolean)
 
 enum StoreCommand: case RegisterStore(...); case UpdateStoreDetails(...); case DeactivateStore(...)
 enum StoreEvent:   case StoreRegistered(...); case StoreDetailsUpdated(...); case StoreDeactivated(...)
 ```
 
-Nothing clever here on purpose. Stores are also where scraper source config attaches
-(which Flipp merchant / site maps to which StoreId) — config, not domain state.
+`chain` moves from `Option[String]` to a required `ChainId` — it is now load-bearing (it is the
+rollup axis and half of an area observation's identity), not a decorative label. `area` is what
+lets a chain-and-region flyer fact be matched to the franchises it actually covers (§2.3.1).
+
+The seed set is small — Calvin shops a handful of stores — so each is registered as
+`(chain, label, area)` by hand. Scraper source config still attaches here (which Flipp merchant
+maps to which `ChainId`, which postal codes to poll) — config, not domain state.
+
+**Honest limitation, stated up front:** this change does **not** let scraping see
+franchise-specific sales. The flyer feed cannot express them (§2.3.1). What it buys is a truthful
+model of what we know and a well-typed home for receipt-exact facts — which is what finally gives
+Purchase a job beyond bookkeeping.
+
 
 ### 2.3 PriceObservation — an append-only stream
 
-**This aggregate IS its event stream.** Entity id = `price|{productId}|{storeId}` (one stream per
-product×store pair — keeps entities small, recovery fast, and the natural query axis aligned with
-the stream). State is only what validation needs:
+**This aggregate IS its event stream.** **REVISED 2026-08-28:** the entity id is
+`price|{productId}|{scope}` where scope is `store:{storeId}` or `area:{chainId}:{area}` — see
+§2.3.1 for why it is no longer keyed on `storeId` alone. One stream per product×scope pair keeps
+entities small, recovery fast, and the query axis aligned with the stream. State is only what
+validation needs:
 
 ```scala
+/** How precisely this price fact is scoped. NOT a confidence — a confidence says
+  * "we might have misread it"; a scope says "here is exactly what we observed and
+  * where it holds." Conflating them would let a precise reading of an imprecise
+  * fact look like a precise fact. */
+enum PriceScope:
+  case Exact(storeId: StoreId)                  // receipt, manual entry, store-specific promo
+  case Regional(chainId: ChainId, area: Area)   // a flyer: this chain, this region, N franchises
+  // `Regional`, not `Area`: a case named `Area` would shadow the `Area` type in its own
+  // parameter list and fail to compile. Implemented as written here.
+
 final case class PriceStreamState(
-    productId: ProductId, storeId: StoreId,
-    lastObserved: Option[(Instant, Money)],   // dedup window
+    productId: ProductId, scope: PriceScope,
+    lastObserved: Option[(Instant, Money, PriceSource)],   // dedup window
     count: Long
 )
 
 enum PriceCommand:
   case ObservePrice(price: Money, observedAt: Instant, source: PriceSource,
+                    scope: PriceScope,             // NEW — record what we actually saw
                     unitPrice: Option[UnitPrice],  // normalized $/100g, $/L … computed upstream
                     promo: Option[PromoFlag],      // was-this-a-sale FACT (not a judgment)
                     priceConfidence: Confidence,   // fact-extraction certainty (price-text/multi-buy/% parsing)
@@ -161,7 +207,7 @@ enum PriceCommand:
                     correlationId: CorrelationId)
 
 enum PriceEvent:
-  case PriceObserved(productId: ProductId, storeId: StoreId, price: Money,
+  case PriceObserved(productId: ProductId, scope: PriceScope, price: Money,
                      unitPrice: Option[UnitPrice], promo: Option[PromoFlag],
                      priceConfidence: Confidence, sizeConfidence: Confidence,
                      observedAt: Instant, source: PriceSource)   // → Hermes product.price.observed
@@ -172,6 +218,42 @@ enum PriceSource:
   case Manual                      // Calvin typed it
   case Backfill(origin: String)    // migration replay (carries ORIGINAL observedAt)
 ```
+
+### 2.3.1 Observation scope — exact vs area (NEW, 2026-08-28)
+
+**The flyer feed cannot express a franchise.** Verified in Demeter's ingestion code, not assumed:
+`FlippDecoders.decodeFlyer` builds every `Flyer` from `merchant_id` + the *queried* `postal_code`
++ locale (`FlippDecoders.scala:99-118`), and every Flipp endpoint is scoped
+`?locale=…&postal_code=…` (`FlippSource.scala:28-35`). There is no store, branch, or franchise
+identifier anywhere in the feed.
+
+So a flyer price is a **(chain, region) fact covering a SET of franchises** — not a store fact.
+With §2.2's franchise-anchored Store, writing one flyer observation as N per-store
+`PriceObserved` events would **fabricate N facts from one observation**. That is precisely the
+inference the facts-only charter pushes downstream to Demeter, so Ariadne must not do it.
+
+**The rule: record the fact as observed; fan out at READ time.**
+
+- Write side stores exactly one event, scoped `Area(chain, region)` for a flyer or
+  `Exact(storeId)` for a receipt / manual entry / store-specific promo.
+- Read side answers "what does product P cost at store S" by preferring the most recent **Exact**
+  observation for S, falling back to the most recent **Area** observation whose `(chain, area)`
+  covers S (§3).
+- The response says which it was. A caller must be able to tell "this is the price your receipt
+  showed" from "this is what the chain's flyer advertises in your region."
+
+**The cost, named rather than hidden:** read-time fan-out needs a store→area coverage mapping —
+which franchises an area observation actually speaks for. That is real data with real staleness,
+seeded from §2.2's `(chain, label, area)` registrations. It is cheap here only because the seed
+set is a handful of stores; it would not be free at scale.
+
+**What this does NOT buy.** It does not make scraping see franchise-specific sales — those are
+invisible to Flipp and are learned only from a receipt or in store. Nor does it much improve
+Demeter's best-price-across-stores alerting (§10.7's option (b)) on flyer data alone: every
+franchise of a chain in a region shares one flyer, so the prices are *identical* and there is
+nothing to choose between. Option (b) pays off across **chains**, which chain-level stores
+already provided, and across franchises only where receipts fill in. Claiming otherwise would
+oversell this change.
 
 **The two confidences are facts and part of the contract, not decoration** (Demeter review,
 2026-08-26). Demeter's pipeline established — and its corpus carries — both a `price_confidence`
@@ -273,8 +355,9 @@ session):
 |---|---|
 | `UnitPriceCalculator`, `PriceTextParser`, `MultiBuyParser`, `PercentOffParser` | **Move to Ariadne** — they compute *facts*. (The percent-off *number* is a fact; the is-it-a-deal *verdict* on it stays Demeter.) |
 | `ObservationAssembler` | **The fact/judgment boundary itself** — its successor is Ariadne's `PriceObserved` producer (the last pipeline stage above) |
-| `TextNormalizer`, `BilingualSplitter` | **SHARED LIBRARY — not a move.** Used by BOTH the matcher and fact extraction; `minFuzzyLength=7` is tuned against a real production false positive. **Never fork** (two drifting copies = bug generator). Design: extract into a small published Scala artifact (proposal: `catalog-text-core`, published via GitHub Packages like the Lexicon stubs, versioned, consumed by both Ariadne and Demeter). *Home + ownership is an open coordination point — §10.* |
-| `FlippSource` / `FlyerSource` / `FlippDecoders`, the fetch ledger, rate limiting | **Move to Ariadne** (port, don't rewrite) |
+| `ProductKeys` | **NEITHER moves nor stays — RETIRED AT CUTOVER.** Demeter's identity function, `sha256(merchantId \| name-tokens \| size)`, superseded by Ariadne's resolver. It cannot be deleted with the ingestion move: `alert_ledger`, `price_observation` and every watch key are built on it, so Demeter keeps using it right up to cutover, when the id map rewrites those rows. Named explicitly because absence from this table reads as *not considered*, and this is precisely what the id map replaces. (Demeter session, 2026-08-30.) |
+| `TextNormalizer`, `BilingualSplitter` | **SHARED LIBRARY — not a move.** Used by BOTH the matcher and fact extraction; `minFuzzyLength=7` is tuned against a real production false positive. **Never fork** (two drifting copies = bug generator). **DECIDED (Calvin, 2026-08-26): Ariadne owns it, embedded in `core` as the self-contained package `me.cference.ariadne.text`; publishing a separate artifact is deferred until a third consumer exists.** The island rule (zero imports from Ariadne's domain types; supporting types defined inside the package) is what keeps that extraction cheap — see §10.5. Demeter's `Confidence` becomes `SplitConfidence` on the way in, to avoid colliding with §6's match score. |
+| `FlippSource` / `FlyerSource` / `FlippDecoders`, the fetch ledger, rate limiting | **Move to Ariadne** — but see §2.6.1: "port, don't rewrite" holds for the pure half only; the effect layer must be re-implemented |
 | `PriceStats`, `DealVerdict`, watchlist/alerting/insight/CPI | **Stay in Demeter** (judgments), now fed by Ariadne |
 
 **Flipp source quirks — load-bearing, carried verbatim** (descending pain, from the Demeter
@@ -297,6 +380,114 @@ session; ignore any of these and the corpus corrupts *quietly*):
 5. **One postal code decides which stores' flyers exist** — config, no useful default.
 6. **No auth** — an unauthenticated public endpoint; the politeness policy (#2 + #3) is
    load-bearing, not optional tuning.
+
+**Zero-priced items: rejected, and counted under their OWN reason.** Measured by the Demeter
+session across 35,088 real observations: exactly 3 rows priced 0.00, all `ScalarPrice` — the
+decoder read a true `0.00` out of the flyer. They are carrier handset promotions ("$0 phone" on a
+postpaid contract that is not free). So the number is **true** and using it as a price would be
+**false**: a real advertised price, and a meaningless comparable one.
+
+Ariadne's `Money` rejects non-positive, so these do not become price facts. That stands. But the
+rejection must NOT land in the generic decode-drop counter, because that counter would then mean
+two different things — *we could not read this* and *we read it perfectly and chose not to keep
+it* — and the second would be invisible inside the first. It is counted as
+`zero-priced (contract or promotional)`, a category rather than breakage.
+
+The consequence if it were kept is real though latent: a $0 phone drags a rolling minimum to zero
+permanently. It has not bitten Demeter only because nobody watches phones.
+
+### 2.6.0 Verifying the port: the archive diff, and its EXPECTED asymmetry
+
+Before a single live fetch, the ported decoders are run over Demeter's 271 archived responses and
+the result diffed against their 35,088 stored observations. Real bytes, a known-good answer, and
+the decoder isolated from the transport — a dual-run without the dual, and a stronger test of the
+decoder than the live dual-run will be.
+
+**The acceptance criterion is DIRECTIONAL, and it is written here before the test exists so that a
+non-zero diff cannot be rationalised after the fact.**
+
+| Direction | Meaning | Action |
+|---|---|---|
+| Ariadne produces items Demeter LACKS | **Expected.** Their bug, since fixed | none — this is the signal the fix worked |
+| Demeter has items Ariadne LACKS | **A port defect** | investigate; tell the Demeter session |
+
+Three dated sources of expected one-directional delta (Demeter session, 2026-09-01):
+
+1. **Nine archived responses have zero observations**, three of them from 2026-08-26 —
+   `raw_response` 167 (506 kB), 168 (159 kB), 171 (194 kB). Those are three flyers that 0.6.0 lost
+   *whole*: one unparseable item threw out of assembly and took the entire flyer with it. The
+   archive caught the bytes; only the parse discarded them. Expect a few hundred items from
+   responses where they have none.
+2. **Zero-size items.** Before 0.6.1 a size normalising to `0.000` threw. It now discards the
+   candidate and keeps the item with `size = None`, so archives predating 2026-08-26 decode to
+   *more* items than were stored at the time.
+3. **Oversized pack counts.** `"99999999999 x 500 ml"` threw `NumberFormatException` out of a pure
+   parser. Same shape, same fix, same asymmetry.
+
+**READ THE MANIFEST FIRST — it says which world the diff is running in.** Demeter's export
+manifest carries `raw_response_without_observations` live at export time, and that one number
+decides how the table above is applied:
+
+```
+raw_response_without_observations = 9   ->  Replay has NOT run. Expect extras from
+                                            167/168/171 and six others. Expected noise.
+raw_response_without_observations = 0   ->  Replay HAS run; those responses now have
+                                            observations. Any extras our decoders produce
+                                            are UNEXPLAINED, and worth investigating.
+```
+
+Demeter has a `Replay` that re-derives observations from archived bytes, idempotently (observations
+key on the archive's fetch time, so a re-run inserts nothing for already-processed responses).
+Under their fixed parsers it would recover exactly those responses. Whether it runs is with Calvin,
+because it writes to `price_observation` — the table this project treats as irreplaceable.
+
+So the number flipping 9 -> 0 converts a whole category of expected noise into signal, and the
+manifest is the thing that tells us which. **This paragraph exists so a future reader who sees `0`
+and finds no extras concludes the caveat was RESOLVED rather than overblown.** The directional rule
+above is unchanged either way; it just applies to a smaller set.
+
+Those three are also the argument for the archive existing at all: every one of them was
+recoverable only because the bytes were kept before anything trusted the parse.
+
+### 2.6.1 What actually ports, and what must be re-implemented
+
+**"Port, don't rewrite" cannot hold uniformly, and the split runs THROUGH files rather than
+between them** (Demeter session, 2026-08-30 — measured by them, re-verified here against their
+tree).
+
+The stacks do not meet: Demeter is Scala 2.13.18 with cats-effect + http4s + doobie; Ariadne is
+Scala 3.3.4 with Pekko and r2dbc and **zero** cats-effect references. Pure code crosses almost
+free — `-Xsource:3` has been on in Demeter from the start precisely to make this cheap — while
+anything in `F[_]` must be rebuilt.
+
+| Component | Ports verbatim | Must be re-implemented |
+|---|---|---|
+| `FlippDecoders` | **all of it** — 0 effectful references (verified) | — |
+| `UnitPriceCalculator`, `PriceTextParser`, `MultiBuyParser`, `PercentOffParser` | **all of them** — pure by construction | — |
+| `HttpPolicy` | `Backoff.wait` (pure, deliberately split from the clock so it could be property-tested), `BotWallDetection.classify`, `HeadersPolicy` | `RateLimiter[F]` — cats-effect `Temporal` |
+| `FlippSource`, `Http4sTransport`, `FlyerSource` | — | http4s `Client`, `F[_]` throughout |
+| fetch ledger | — | doobie → r2dbc |
+
+**What must survive the rewrite is not the code — it is the CONSTANTS and the SEMANTICS.** A
+faithful-looking Pekko rewrite that quietly changes one of these is a correct-looking port that
+behaves differently against a bot-walled upstream, and no test written from the new code would
+notice:
+
+```
+maxAttempts  = 3
+backoffBase  = 1.second
+backoffCap   = 30.seconds
+rateLimit    = 4          // requests per window, per source
+rateWindow   = 1.minute   // <- the window itself. "4 per window" is meaningless without it,
+                          //    and this doc previously recorded the 4 and omitted the minute.
+```
+
+Plus the **bot-wall signature list** (not merely the 403 check), the **fetch ledger's real key
+`(flyer_id, window_from, window_to)`** — the flyer id alone is NOT the key, and keying on it would
+stop re-fetching once a window rolls — and the **merchant re-stamp** (quirk #1).
+
+Those constants, the signature list, the ledger key and the re-stamp are the port's actual
+acceptance criteria. The code around them is replaceable; they are not.
 
 **Raw-response archive + replay — a FIRST-CLASS requirement, not an optimization.** Demeter
 archives raw response bytes *before* anything trusts the parse, and can re-derive the full
@@ -329,11 +520,12 @@ schema-evolution story for read models). Offsets in the standard projection offs
 | Projection | Source streams | Tables (sketch) | Serves |
 |---|---|---|---|
 | **product-catalog** | Product, Store | `products(id, name, brand, category, size, status, merged_into)` · `product_gtins(gtin→product_id)` · `product_aliases` · `product_listings(store_id, external_id → product_id)` · `stores` | GetProduct / ListProducts / SearchProducts; redirect-following for merged ids |
-| **price-history** | PriceObservation | `price_history(product_id, store_id, observed_at, price, unit_price, promo, price_confidence, size_confidence, source, correlation_id)` — the shared read model from the EventStorming wall | GetPriceHistory (product × store × time) — incl. **demeter-insight**'s history endpoint + price chart (§4) |
-| **current-price** | PriceObservation | `current_price(product_id, store_id, price, unit_price, observed_at, source)` — one row per pair, last-write-wins by `observedAt` | GetCurrentPrice (the shopping-list NOW call) |
+| **price-history** | PriceObservation | `price_history(product_id, scope_kind, store_id?, chain_id?, area?, observed_at, price, unit_price, promo, price_confidence, size_confidence, source, correlation_id)` — the shared read model from the EventStorming wall. **Scope columns are nullable by kind** (§2.3.1): an `exact` row carries `store_id`, an `area` row carries `chain_id`+`area`. Queries for a store UNION its exact rows with the area rows covering it | GetPriceHistory (product × store × time) — incl. **demeter-insight**'s history endpoint + price chart (§4) |
+| **current-price** | PriceObservation | **REVISED 2026-08-28 during implementation:** `current_price(product_id, scope_key, scope_kind, store_id?, chain_id?, area?, …)` — one row per product×**scope**, with exact-over-area resolved in the QUERY (`currentPriceForStore`), not materialised per store. Materialising per-store rows means fanning an area observation across member franchises at *write* time, which reintroduces exactly the staleness §2.3.1 exists to avoid: a franchise registered after the flyer was scraped would have no price until something backfilled it. Query-time resolution is equivalent to serve, needs no backfill, and prices a new store the moment it is registered — proven by test. Last-write-wins is by `observedAt`, not arrival, so an out-of-order backfill cannot overwrite a newer price. `scope_kind` is returned so a caller can tell a receipt price from a regional flyer claim | GetCurrentPrice (the shopping-list NOW call) |
 | **purchase-history** | Purchase | `purchases`, `purchase_lines` | ListPurchases; future budgeting queries |
 | **resolver/match index** | Product | `match_index(product_id, normalized_name, name_tokens, trigrams tsvector/pg_trgm, brand_norm, size_class)` + the gtin + listing tables above; rows record the normalizer/matcher version they were built with (§6.6) | ResolveProduct scoring (§6.4); the GTIN-uniqueness guard |
 | **review-queue** | ResolutionCase | `resolution_cases(id, state, subject, candidates_json, created_at)` | ariadne-ui review screens |
+| **store-coverage** | Store | `store_coverage(store_id, chain_id, area)` — which franchises an `Area(chain, area)` observation speaks for. **Stateful and it goes stale**: a chain re-districts or a franchise closes and the mapping is silently wrong. There is no authoritative source in the feed — it is inferred from which postal codes returned which merchant's flyer, so treat it as maintained data, not a derived join. Cheap today only because Calvin shops a handful of stores — a fact about current usage, NOT a property of the design | the read-time fan-out of §2.3.1; rebuilt from the Store journal like everything else |
 | **hermes-publisher** | Product, PriceObservation, Purchase | (offset only) | §5 — the outbox projection |
 | **price-append process manager** | Purchase | (offset only) | issues `ObservePrice(source=Purchase)` per line (§2.4) |
 
@@ -359,8 +551,10 @@ service AriadneCatalog {
   rpc ResolveProduct    (ResolveProductRequest)    returns (ResolveProductResponse);  // THE resolver (§6): gtin and/or name/brand/size in →
                                                                                       // Matched{id, confidence} | Ambiguous{candidates} | NoMatch
   // Prices
-  rpc GetCurrentPrice   (GetCurrentPriceRequest)   returns (GetCurrentPriceResponse); // product_id (+optional store_id) → best/current per store
-  rpc GetPriceHistory   (GetPriceHistoryRequest)   returns (stream PricePoint);       // product × optional store × time range; server-streamed
+  rpc GetCurrentPrice   (GetCurrentPriceRequest)   returns (GetCurrentPriceResponse); // product_id (+optional store_id) → current per store, exact-over-area (§2.3.1);
+                                                                                      // response states scope so a receipt price is distinguishable from a flyer claim
+  rpc GetPriceHistory   (GetPriceHistoryRequest)   returns (stream PricePoint);       // product × optional store × time range; server-streamed.
+                                                                                      // PricePoint carries scope (exact|area) — §2.3.1
   // Purchases
   rpc ListPurchases     (ListPurchasesRequest)     returns (ListPurchasesResponse);   // time range, paged
   // Writes that a caller awaits (thin command surface)
@@ -385,8 +579,20 @@ moves here, insight re-points to this RPC — a required migration consumer, see
 ### REST + `/docs`
 
 A **small REST surface exists for the browser** (constellation rule: gRPC = internal, REST =
-browser/BFF), serving **ariadne-ui only**: the review queue (list/confirm/reject/merge/split),
-product CRUD + search, manual purchase entry, manual price entry. It is a thin mirror of the same
+browser/BFF), serving **ariadne-ui AND dionysus-planner**: the review queue
+(list/confirm/reject/merge/split), product CRUD + search + resolve, the store surface (§7.2),
+manual purchase entry, manual price entry.
+
+**RULED 2026-09-05 (Calvin, directly).** §9's table put Dionysus on gRPC; dionysus-planner relayed
+that REST was wanted, and the two could not both be right. The rule that decides it: a Next.js BFF
+is server-side but is still a BFF, and the blocked-and-waiting argument in §9 is about **latency
+shape, not protocol** — REST over the same read models satisfies it. gRPC stays the surface for
+Demeter and demeter-insight, and its first build (step 5, still unbuilt) can now wait for the
+Lexicon contract to settle rather than being shaped by whoever needed it first.
+
+The consequence to keep in view: this surface now has **two consumers**, so the OpenAPI document is
+a published contract rather than an affordance Ariadne can change freely. That is what the drift
+gate (`OpenApiDriftSpec`) is guarding, and why it fails closed. It is a thin mirror of the same
 commands/queries — generated from the same Lexicon contract, no second behavior. With it, per the
 Apollo v0.13.0 precedent: **self-hosted Swagger `/docs`** (OpenAPI on-classpath, zero
 CDN/egress), and the maintained **Insomnia collection** covering every REST endpoint. `/health`
@@ -402,7 +608,7 @@ Prometheus `/metrics` with Hera scrape annotations round out the HTTP server.
 | Topic | Domain event | Payload (Lexicon schema, PROPOSAL) | Subscribers |
 |---|---|---|---|
 | `product.registered` | `ProductRegistered` (and `ProductMerged` tombstones — see below) | product id, name, brand, size, gtin?, status, origin, `correlationId` | **Demeter** (optional: refresh watchable-product cache) · **Dionysus** (optional: new-product awareness for ingredient linking); both may ignore it in v1 |
-| `product.price.observed` | `PriceObserved` | product id, store id, price, unit price, promo?, **price_confidence, size_confidence** (§2.3 — size ambiguity must reach Demeter's match confidence), observed_at, source, `correlationId` | **Demeter** (REQUIRED — the deal-evaluation policy: *whenever PriceObserved on a watched product then evaluate*) |
+| `product.price.observed` | `PriceObserved` | product id, **scope (`exact{store_id}` \| `area{chain_id, area}` — §2.3.1)**, price, unit price, promo?, **price_confidence, size_confidence** (§2.3 — size ambiguity must reach Demeter's match confidence), observed_at, source, `correlationId` | **Demeter** (REQUIRED — the deal-evaluation policy: *whenever PriceObserved on a watched product then evaluate*). **Scope is required for correct alerting:** an area price speaks for every franchise of that chain in the region, so treating it as one store's price would under-count coverage, and treating it as N store prices would fabricate N facts |
 | `purchase.recorded` | `PurchaseRecorded` | purchase id, store id, purchased_at, lines[], total, source, `correlationId` | none in v1 · **future budgeting (Plutus)** · Dionysus MAY subscribe later for pantry restock |
 
 Topic names live in Ariadne's chart/config (env-overridable, the Artemis idiom); the service
@@ -508,6 +714,39 @@ forked):
 
 Thresholds are config, not code; tune against the review queue's accept-rate.
 
+#### 6.4.1 Path A, as wired (2026-09-05)
+
+`ResolutionService.resolveForScrape` is the whole of Path A, and its three branches are
+deliberately not symmetric:
+
+- **Matched** → observe against the product.
+- **Ambiguous** (0.60–0.92) → open the review case, observe NOTHING. A human decides.
+- **NoMatch** (< 0.60) → **not** a review case. Mint a Provisional product and let prices flow.
+
+The distinction that took a moment to see clearly: **ambiguity is a QUESTION** (two products might
+be this one) while **absence is an ANSWER** (none of them are). Only the question needs a human. A
+review queue full of "here is a thing you have never seen" is a queue nobody works, and the price
+facts would be held hostage behind it.
+
+Two hazards this created, and what closes them:
+
+1. **Duplicate provisionals.** The provisional's id is DERIVED from the normalised subject (GTIN
+   first, else normalised name+brand), not random. Two things would otherwise duplicate: one run
+   meeting the same name twice, and — because the match index is eventually consistent — the next
+   run reaching the resolver before the product it just created is visible to it. A random id turns
+   both into a fresh product every time, which is precisely the catalog-of-duplicates outcome the
+   resolver exists to prevent. A second register under the same id is refused by the aggregate, and
+   that refusal is the SUCCESS case.
+2. **Nameless listings.** A blank `rawName` would mint one provisional that every nameless item in
+   the corpus falls into — a single product accumulating unrelated prices, reading as a real product
+   with a very busy history. Refused at the mapper, before the price is even looked at, under its
+   own counted reason (`Nameless`).
+
+Because the entity's refusal reply carries only a message string (the serialization trade-off
+recorded in §3), a refusal cannot be told from a genuine failure by its type. So the refusal path
+**verifies** — it re-reads the product and confirms it exists — rather than assuming. Assuming would
+attribute prices to a product that was never created.
+
 ### 6.5 Human review — ariadne-ui's reason to exist
 
 The review queue (ResolutionCase aggregate → review-queue projection → REST) offers four verbs:
@@ -554,6 +793,22 @@ Asked explicitly during the Demeter alert-dedup decision (Calvin decided (b), 20
 > across stores" for that id is the lowest **effective price** — apples-to-apples by
 > construction.
 
+**A SUBDIVISION IS NOT A SECOND PRODUCT.** §6.7 governs *purchasable* units. A 366 g box of
+oatmeal containing 6 x 61 g pouches is ONE product: the box is what is bought, the pouch is a line
+printed on it. Ariadne carries the outer package size (366 g) and nothing else — that is what
+unit-price and identity are computed from.
+
+The inner pack (`packQuantity`/`packUnit` in dionysus-planner) **stays with Dionysus**, and the
+reason is the facts-only rule rather than convenience. Ask who needs it: Dionysus does, for
+portioning — recipes saying `{1%pack}`, the Eat dialog prefilling one pouch, pantry "−1 pack".
+Demeter does not; deals are about the purchasable unit. Ariadne does not; the box is the identity
+and the box is the unit price. An attribute exactly one consumer needs is the God-object signature,
+and "it is printed on the package" does not make it Ariadne's — nutrition is printed on the package
+too, and it lives in Dionysus for the same reason.
+
+(Ruled 2026-09-01 after the dionysus-planner session raised it. Recorded here because they asked
+§6.7 to say which way, and an unstated ruling is one that gets re-litigated.)
+
 If a consumer ever wants cross-size comparison ("cheapest butter per gram, any size"), that is a
 **downstream layer**: a Demeter watchlist-of-products compared on **unit price** — never an
 Ariadne merge. Merging sizes here would destroy the apples-to-apples property everything above
@@ -583,6 +838,73 @@ history (`PriceSource.Purchase` — the best facts we get), and `purchase.record
 budgeting feed.
 
 ---
+
+### 7.1 Purchase entry from another service — writes do not degrade like reads
+
+Purchases are Ariadne's (Calvin, 2026-09-01). The consequence dionysus-planner raised is real and
+is designed for here rather than discovered later: **a purchase is a WRITE, and writes do not
+degrade the way reads do.** "Ariadne down means an unpriced shopping list" is easy because a
+missing price is a missing nicety. A dropped receipt is lost user data, and unlike a price it can
+never be reconstructed — the flyer feed will never contain what was actually paid.
+
+**The buffer must be client-side, and that is not a preference.** If Ariadne is unreachable the
+request never arrives, so there is nothing here to retry with; no amount of server-side retry
+semantics helps. The caller keeps a local write-ahead row and drains it, which makes its own
+purchase table an OUTBOX rather than a record of truth.
+
+**What that requires of Ariadne, and what has been changed to provide it:** re-recording the same
+purchase is now a **no-op success** rather than `AlreadyRegistered`. An error would be
+indistinguishable from a genuine failure, so the outbox could never drain — the row would retry
+forever. A *different* purchase under an already-taken id is still refused, because that is an id
+collision rather than a retry and accepting it would overwrite one receipt with another. Sameness
+is decided by content, not by the caller asserting it.
+
+The caller mints the `PurchaseId`, which is what makes the retry addressable at all.
+
+**Migration split, finer than "gated on the ingredient backfill":**
+
+- *Historic* receipts are keyed by the planner's `ingredientId` and can only reach a `ProductId`
+  through the ingredient link, so they wait for that backfill.
+- *New* entries resolve at entry time and do not. A purchase is about the product BOUGHT, not the
+  ingredient it will be cooked into — which is why an ingredient legitimately having no product
+  forever ("salt to taste") does not imply the purchase of salt has none. Unmatched purchased items
+  take a Provisional product and surface in the review queue, exactly as a scraped listing does.
+
+**A free-text store is a resolution problem one level up.** `purchase.store` is typed text
+("Metro", "IGA"); Ariadne needs a `StoreId`. Same ambiguity the resolver exists for, but over a
+handful of rows rather than a catalogue, so an alias table is likely to beat the fuzzy matcher.
+
+### 7.2 The store surface — CLOSED 2026-09-05
+
+**Was a gap.** Flagged by dionysus-planner 2026-09-01 and confirmed: `CatalogRoutes` exposed
+`storeId` only as a query parameter, so nothing listed, resolved or registered a store. The
+`StoreEntity` and the `stores`/`store_coverage` projections existed; no HTTP reached them. The
+receipt migration could not proceed without it.
+
+Now built: `GET /api/v1/stores` (filter by chain/area/active), `GET /api/v1/stores/{id}`,
+`GET /api/v1/stores/resolve?q=&area=`, `POST /api/v1/stores`.
+
+**Resolution NEVER picks, and that is the whole design of it.** A receipt says "Metro", and §2.2
+made the individual franchise the Store — so "Metro" names a CHAIN, and the ordinary case is that
+the text matches several franchises correctly and none of them uniquely. Auto-picking would
+attribute a purchase to a specific franchise on no evidence at all: the same class of error §2.3.1
+refuses for prices, arriving through the back door of a receipt. The response therefore states
+`unique` as a FIELD rather than leaving a caller to infer it from a list of length one, which would
+turn a coincidence into certainty.
+
+Scoring runs in memory over the store rows rather than in SQL — §7.1's own reasoning, a handful of
+rows rather than a catalogue. That stops being true somewhere in the hundreds, at which point this
+wants the same pg_trgm treatment `match_index` gets; the repository call is already bounded so the
+change is contained.
+
+Registration derives a stable id from chain+area+name when the caller gives none, for the same
+reason provisional product ids are derived (§6.4.1): a receipt flow has no id to offer, and a retry
+— a dropped response, a double tap on a picker — must land on the store it already created. A
+duplicate is 409 carrying that id, so a retry is answerable without a lookup.
+
+**Still open:** an alias table (§7.1's suggestion). Normalisation handles case and spacing drift but
+not genuine aliases — "Metro Plus" for Metro, "Super C" as its own banner. Worth building when the
+candidate lists prove insufficient against real receipts, not before.
 
 ## 8. Cross-cutting
 
@@ -618,6 +940,7 @@ budgeting feed.
 | New-product / merge awareness (both consumers, optional) | **Hermes** `product.registered` | reaction |
 | Future budgeting | **Hermes** `purchase.recorded` (+ gRPC ListPurchases) | reaction (+ pull) |
 | ariadne-ui | **REST** (+ self-hosted `/docs`, Insomnia collection) | browser/BFF rule |
+| dionysus-planner (its BFF, server-side) | **REST** — RULED 2026-09-05 (§4) | a BFF is a BFF; blocked-and-waiting is latency shape, not protocol |
 | Scraper → Ariadne | in-process (the policy lives inside Ariadne) | facts belong with facts |
 
 ## 10. Open questions (tracked, not blocking)
@@ -626,15 +949,60 @@ budgeting feed.
    decide with the Lexicon session when the first consumer needs merges.
 2. Fuzzy thresholds (0.60/0.92) are guesses — tune against real Flipp data during the Demeter
    backfill (the backfill doubles as the matcher's test corpus).
-3. Store granularity: chain vs individual location (prices differ by location for some chains).
-   v1: chain-level with optional location; revisit when it hurts.
+3. **Store granularity — RESOLVED 2026-08-28 (Calvin, relayed via dionysus-planner): the
+   individual franchise is the Store; `chain` becomes the rollup attribute.** The v1 answer
+   (chain-level with optional location) broke on a real requirement — a single IGA franchise can
+   run a sale no other IGA has. Revised model in §2.2; the consequence for price facts, which is
+   the larger half of the change, is §2.3.1: the flyer feed cannot express a franchise, so a
+   scraped price is an `Area(chain, region)` fact and fanning it onto member stores at write time
+   would fabricate precision. Recorded as observed, fanned out at read time. Store logistics
+   (hours, addresses, geo) remain explicitly out of scope.
 4. Receipt-OCR worker placement (Argus-style worker vs in-service) — v2 question.
-5. **Shared text-normalization artifact** (§2.6): `TextNormalizer` + `BilingualSplitter` must be
-   consumed by BOTH Ariadne (matcher + fact extraction) and Demeter (its remaining pipeline)
-   without forking. Proposal: a small published Scala lib (`catalog-text-core`, GitHub Packages).
-   **Where it lives and who owns it needs Calvin + Demeter + Lexicon coordination** — new repo vs
-   published from an existing one vs Lexicon-adjacent.
-6. **Lexicon contract additions** from the Demeter review: `price_confidence` + `size_confidence`
+5. **Shared text-normalization artifact — DECIDED by Calvin, 2026-08-26: Ariadne owns it,
+   embedded, extraction deferred.** `TextNormalizer` + `BilingualSplitter` must be consumed by
+   BOTH Ariadne (matcher + fact extraction) and Demeter (its remaining pipeline) **without
+   forking** — two drifting copies is a bug generator, and `minFuzzyLength=7` is tuned against a
+   real production false positive. The v1 proposal was a separately published lib
+   (`catalog-text-core`, GitHub Packages). **Not taken now.** The shared surface is ~265 lines of
+   pure, zero-dependency functions; a dedicated repo + CI + publish pipeline + cross-session
+   release train is disproportionate at that size, and it puts a release-and-two-bumps latency on
+   exactly the code whose whole point is tuning.
+
+   **Decision:** the code lives in `core` as a self-contained package, `me.cference.ariadne.text`.
+   Ariadne owns it because ownership follows use — after the migration Ariadne runs the matcher,
+   fact extraction, and the resolver, so this is hot spot #1's foundation, while Demeter's use
+   shrinks as ingestion moves out. The dependency direction also already exists: Demeter consumes
+   Ariadne for prices and history, so one more edge the same way is consistent; the reverse would
+   make the upstream facts supplier depend on a downstream consumer.
+
+   **Why embedded under uncertainty** (there may or may not ever be a third consumer — Calvin,
+   asked directly, doesn't know): the two options fail asymmetrically. Embedded-then-extract costs
+   one mechanical extraction, paid once, at the point we actually know. Separate-repo-never-needed
+   costs permanent overhead forever. Under genuine uncertainty the cheap-to-reverse option wins.
+
+   **THE ISLAND RULE — load-bearing, this is what keeps extraction cheap.** The package must stay
+   self-contained: zero imports from Ariadne's domain types, its own supporting types
+   (`BilingualText`, `Locale`, and its confidence notion) defined *inside* it, and nothing in
+   `core`'s domain reaching in except through the normalizer/splitter entry points. If `ProductId`
+   or `Quantity` ever leaks in, the package is welded to the service and this decision silently
+   becomes irreversible.
+
+   **Naming collision to avoid:** Demeter's `Confidence` is `Low | Medium | High` (text-split
+   confidence); Ariadne's `Confidence` (§6) is a match score in `[0,1]` on `ListingLinked`. Same
+   name, different concepts — the text one becomes `SplitConfidence` on the way in. Do NOT unify
+   them.
+
+   **Revisit when:** a third consumer appears (Dionysus needing bilingual splitting for ingredient
+   matching, a future Plutus, anything). Two consumers with a clear upstream/downstream
+   relationship does not justify a shared repo; three peers would. At that point extract the
+   package as-is — that is what the island rule buys.
+
+   G3 in `migration-demeter.md` is a **pre-cutover** gate, not a pre-build one: this decision
+   unblocks building `core` now, and Demeter consumes the published artifact only when the
+   migration actually runs.
+6. **Lexicon contract additions** — now THREE, and they should be proposed together in one
+   pass rather than as successive amendments: the observation **scope** field (§2.3.1) alongside
+   the Demeter review's `price_confidence` + `size_confidence`
    on `PriceObserved`/`PricePoint` (§2.3 — the size-ambiguity coupling is contract-required), and
    whether `matcher_version` should be surfaced on resolution responses. Propose with the rest of
    `ariadne.v1`.
@@ -651,15 +1019,24 @@ budgeting feed.
 ## 11. Build order (suggested)
 
 1. Seed repo per `new-scala-pekko-service` (core/server split), pg-service wiring, health/metrics.
-2. `core`: value types + the four fact aggregates' decide/evolve + tests.
+2. `core`: value types + the four fact aggregates' decide/evolve + tests. **Built 2026-08-26
+   against the pre-revision model; the §2.2/§2.3.1 change lands on top** — `Store` gains
+   `ChainId`/`Area`, `PriceObservation` swaps `storeId` for `PriceScope`. Cheap now (no
+   persistence, no projections, no contract yet); a migration once step 4 or 5 exists.
 3. `core`: normalizer + scorer (§6.3) + property tests — the hard part, do it early.
-4. `server`: persistence entities + product-catalog/price-history/current-price projections.
+4. `server`: persistence entities + product-catalog/price-history/current-price/**store-coverage**
+   projections (the last one backs §2.3.1's read-time fan-out).
 5. gRPC surface (stub the Lexicon contract locally while the proposal is reviewed).
 6. Hermes publisher projection + topic self-provisioning (client pinned @v1.13.0).
 7. ResolutionCase + review queue + REST + `/docs` + Insomnia.
 8. Scraper adapter (Flipp first — port Demeter's ingestion incl. the fetch ledger, rate
    limit/bot-wall handling, and the merchant re-stamp; **raw-archive + replay from day one**;
-   §2.6 + `migration-demeter.md`). Blocked on the shared text-lib decision (§10.5) — stub it
-   behind an interface until the artifact exists.
+   §2.6 + `migration-demeter.md`). The shared text-lib blocker is **cleared** — §10.5 is decided
+   (Ariadne owns it, embedded in `core`), so the normaliser is built in step 3, not stubbed.
+   **DONE 2026-09-05, including the runtime wiring** — real Pekko-HTTP transport, one
+   `ShardedDaemonProcess` scheduler per configured source, `ariadne.scrape` config, and the
+   §6.4 Path A resolution loop (see §6.4.1). **Disabled by default**, which is a decision rather
+   than caution: enabling it points a scraper at a live, undocumented, bot-walled third-party
+   endpoint, and that should be an explicit act in the environment that means to do it.
 9. Purchase v1 (manual) + the price-append process manager.
 10. Migrations per `migration-demeter.md` / `migration-dionysus.md`.
