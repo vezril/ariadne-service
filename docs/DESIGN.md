@@ -635,18 +635,46 @@ v1.1 — flagged as an open question, not landed.
 
 ### The publisher — an event-sourced outbox projection
 
-No dual-write. The Hermes publisher is a **Pekko Projection over the journal** (`hermes-publisher`
-in §3): it reads committed events by tag, maps domain event → Lexicon message, publishes via the
-pinned `hermesmq-client` (@v1.13.0), and only then advances its offset.
+**BUILT 2026-09-07.** No dual-write. The publisher is a **Pekko Projection over the journal**:
+it reads committed events, maps domain event → message, publishes, and only then advances its
+offset.
+
+Three corrections to what this section said before it was built, each found by building it:
+
+1. **The client.** §5 said "the pinned `hermesmq-client` (@v1.13.0)". *That artifact and version do
+   not exist* — hermesmq's tags stop at v1.9.1 and its client is published only as a dynver
+   snapshot. The fleet's working path is the Lexicon's gRPC stubs (`io.codex %% lexicon-hermes-grpc`,
+   pinned 0.8.0), which artemis-service has run in production since v1.2.x. Ariadne follows the
+   precedent that exists rather than the pin that does not.
+2. **Three projections, not one.** `eventsBySlices` subscribes by entity type, so there is one
+   publisher per type (product, price, purchase). Each has its OWN `ProjectionId`, and that is
+   operational rather than cosmetic: sharing an offset with a read model would make a Hermes outage
+   stall the read models, so the REST surface would go stale because a broker was unreachable.
+3. **The contract does not exist.** The Lexicon has no product-catalog schema. Its only
+   `catalog.proto` reserves `PostCreated`/`TagsChanged`/`PostPurged` for a *different* Ariadne — an
+   analytics consumer of Artemis's media catalog — which is a **name collision**, not this service.
+   `docs/lexicon-proposal-catalog.proto` is the proposal; payloads are hand-encoded to its canonical
+   protobuf JSON so adopting the contract changes the encoder and not the bytes. **A consumer
+   building against these payloads today is building against a proposal**, and should know it.
+
+**Deduplication is the broker's, not every consumer's.** The deterministic
+`{persistenceId}:{seqNr}` rides as the publish `idempotency_key`, so an at-least-once republish
+collapses at the source instead of making every consumer in the constellation responsible for
+detecting duplicates.
 
 - **At-least-once, restart-safe:** offset commits after successful publish → crash between
   publish and commit ⇒ re-publish, never a lost event. Consumers must be idempotent (they already
   must be, constellation-wide); every message carries a deterministic `messageId`
   (`{persistenceId}:{seqNr}`) so duplicates are detectable.
 - **Ordering:** per-entity order is guaranteed by the journal; that's the only ordering promised.
-- **Correlation:** the journaled `correlationId` is carried onto the published message (v1.13.0
-  tracing) — a scrape → resolve → observe → deal-alert chain is traceable end-to-end across
-  Ariadne → Hermes → Demeter.
+- **Correlation — NOT YET IMPLEMENTED, found 2026-09-07 while building the publisher.** The
+  intended behaviour is that the journaled `correlationId` rides the published message, so a
+  scrape → resolve → observe → deal-alert chain is traceable end-to-end. It cannot: **no event in
+  the journal carries a correlationId.** Every *command* has one and `decide` drops it, so §8's
+  "journal it on every event" was never implemented. The publisher sends an empty correlation id,
+  which is the honest behaviour — minting one at publish time would produce a traceable-LOOKING id
+  that links to nothing. Fixing it means adding the field to every journaled event: cheap now while
+  the journal is empty, expensive once it is not.
 - **Backpressure/outage:** Hermes down ⇒ the projection retries with backoff and simply lags
   (offset doesn't advance); the write side is unaffected. `/health` readiness reports the lag;
   a `ariadne_hermes_publisher_lag` gauge feeds Hera.

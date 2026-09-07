@@ -52,6 +52,26 @@ lazy val scalaCheckPlusVersion = "3.2.19.0"
 lazy val logbackVersion = "1.5.16"
 lazy val logstashEncoderVersion = "8.0"
 
+// The shared HermesMQ contract, as PUBLISHED JARS — no protobuf codegen runs here.
+//
+// DESIGN §5 said "the pinned hermesmq-client @v1.13.0". That artifact/version does not
+// exist: hermesmq's tags stop at v1.9.1 and its client is published only as a dynver
+// snapshot. The fleet's working path is the Lexicon's gRPC stubs — artemis-service has
+// run them in production since v1.2.x — so Ariadne follows the precedent that exists
+// rather than the pin that does not. §5 is corrected to match.
+lazy val lexiconVersion =
+  "0.8.0" // +correlation_id envelope field (request-tracing), which §8 needs
+
+// read:packages token for the-lexicon GitHub Packages resolver: LEXICON_TOKEN (the CI
+// secret, mirroring apollo-storage and artemis) preferred, else GITHUB_TOKEN (authorized
+// dev). None => the pinned version resolves from ~/.ivy2/local after `sbt publishLocal`
+// in the-lexicon, the documented local fallback. No credentials are committed.
+lazy val lexiconToken: Option[String] =
+  sys.env
+    .get("LEXICON_TOKEN")
+    .filter(_.nonEmpty)
+    .orElse(sys.env.get("GITHUB_TOKEN").filter(_.nonEmpty))
+
 // --- root: aggregate only, not published -------------------------------------
 lazy val root = (project in file("."))
   .aggregate(core, server)
@@ -80,7 +100,20 @@ lazy val server = (project in file("server"))
   .settings(
     name := "ariadne-server",
     Compile / mainClass := Some("me.cference.ariadne.Main"),
+    resolvers ++= lexiconToken
+      .map(_ => "Lexicon GitHub Packages".at("https://maven.pkg.github.com/vezril/the-lexicon"))
+      .toSeq,
+    credentials ++= lexiconToken
+      .map(token => Credentials("GitHub Package Registry", "maven.pkg.github.com", "vezril", token))
+      .toSeq,
     libraryDependencies ++= Seq(
+      // The HermesMQ gRPC stubs (pre-generated in the published jar) + the runtime that
+      // drives them. Ariadne only PUBLISHES, but the stubs come as one contract.
+      "io.codex" %% "lexicon-hermes-grpc" % lexiconVersion,
+      // pekko-grpc-runtime arrives transitively with the stubs. It pulls pekko-discovery
+      // at its own line, so discovery is pinned to ours below — Pekko refuses a mixed
+      // classpath outright, which is the good failure, but only if the pin is there.
+      "org.apache.pekko" %% "pekko-discovery" % pekkoVersion,
       // circe, for the ported Flipp decoders ONLY.
       //
       // The service marshals its REST surface with spray-json, so this is a second JSON
