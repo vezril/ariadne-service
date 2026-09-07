@@ -83,9 +83,10 @@ final class ProductSpec extends AnyFunSuite with Matchers {
           None,
           None,
           Origin.Manual,
-          ProductStatus.Active
+          ProductStatus.Active,
+          cid
         ),
-        ProductEvent.ProductMerged(other)
+        ProductEvent.ProductMerged(other, cid)
       )
     )
     Product.decide(merged, ProductCommand.AddAlias("beurre", cid)) shouldBe
@@ -116,9 +117,10 @@ final class ProductSpec extends AnyFunSuite with Matchers {
           None,
           None,
           Origin.Scrape("flipp", Some(listing)),
-          ProductStatus.Provisional
+          ProductStatus.Provisional,
+          cid
         ),
-        ProductEvent.ProductAbsorbed(other, Set(gtin), Set("beurre"), Set(listing))
+        ProductEvent.ProductAbsorbed(other, Set(gtin), Set("beurre"), Set(listing), cid)
       )
     )
     absorbed match {
@@ -145,10 +147,11 @@ final class ProductSpec extends AnyFunSuite with Matchers {
           None,
           Some(gtin),
           Origin.Manual,
-          ProductStatus.Active
+          ProductStatus.Active,
+          cid
         ),
-        ProductEvent.ProductAliasAdded("beurre"),
-        ProductEvent.ListingLinked(listing, Confidence.Certain, MatchMethod.Gtin, matcher)
+        ProductEvent.ProductAliasAdded("beurre", cid),
+        ProductEvent.ListingLinked(listing, Confidence.Certain, MatchMethod.Gtin, matcher, cid)
       )
     )
     Product.decide(s, ProductCommand.AddIdentifier(gtin, cid)) shouldBe Right(Nil)
@@ -187,9 +190,10 @@ final class ProductSpec extends AnyFunSuite with Matchers {
           None,
           None,
           Origin.Manual,
-          ProductStatus.Active
+          ProductStatus.Active,
+          cid
         ),
-        ProductEvent.ProductDeprecated("discontinued")
+        ProductEvent.ProductDeprecated("discontinued", cid)
       )
     )
     Product.decide(s, ProductCommand.Deprecate("again", cid)) shouldBe Left(
@@ -207,11 +211,12 @@ final class ProductSpec extends AnyFunSuite with Matchers {
         None,
         Some(gtin),
         Origin.Manual,
-        ProductStatus.Active
+        ProductStatus.Active,
+        cid
       ),
-      ProductEvent.ProductAliasAdded("beurre"),
-      ProductEvent.ListingLinked(listing, Confidence.Certain, MatchMethod.Gtin, matcher),
-      ProductEvent.ProductDeprecated("discontinued")
+      ProductEvent.ProductAliasAdded("beurre", cid),
+      ProductEvent.ListingLinked(listing, Confidence.Certain, MatchMethod.Gtin, matcher, cid),
+      ProductEvent.ProductDeprecated("discontinued", cid)
     )
     Product.replay(events) shouldBe events.foldLeft[ProductState](ProductState.Empty)(
       Product.evolve

@@ -63,7 +63,10 @@ object PriceCommand {
   ) extends PriceCommand
 }
 
-sealed trait PriceEvent extends CborSerializable
+/** Every event carries the correlation id of the command that caused it (§8). */
+sealed trait PriceEvent extends CborSerializable {
+  def correlationId: CorrelationId
+}
 
 object PriceEvent {
   final case class PriceObserved(
@@ -75,9 +78,14 @@ object PriceEvent {
       priceConfidence: Confidence,
       sizeConfidence: Confidence,
       observedAt: Instant,
-      source: PriceSource
+      source: PriceSource,
+      correlationId: CorrelationId
   ) extends PriceEvent
-  final case class PriceObservationRetracted(observedAt: Instant, reason: String) extends PriceEvent
+  final case class PriceObservationRetracted(
+      observedAt: Instant,
+      reason: String,
+      correlationId: CorrelationId
+  ) extends PriceEvent
 }
 
 /**
@@ -120,7 +128,8 @@ object PriceObservation {
                 c.priceConfidence,
                 c.sizeConfidence,
                 c.observedAt,
-                c.source
+                c.source,
+                c.correlationId
               )
             )
           )
@@ -129,7 +138,9 @@ object PriceObservation {
         state match {
           case PriceStreamState.Empty => Left(DomainError.NotRegistered)
           case _: PriceStreamState.Open =>
-            Right(List(PriceEvent.PriceObservationRetracted(c.observedAt, c.reason)))
+            Right(
+              List(PriceEvent.PriceObservationRetracted(c.observedAt, c.reason, c.correlationId))
+            )
         }
     }
 

@@ -76,7 +76,10 @@ object ProductCommand {
   final case class Deprecate(reason: String, correlationId: CorrelationId) extends ProductCommand
 }
 
-sealed trait ProductEvent extends CborSerializable
+/** Every event carries the correlation id of the command that caused it (§8). */
+sealed trait ProductEvent extends CborSerializable {
+  def correlationId: CorrelationId
+}
 
 object ProductEvent {
   final case class ProductRegistered(
@@ -87,24 +90,30 @@ object ProductEvent {
       size: Option[Quantity],
       gtin: Option[Gtin],
       origin: Origin,
-      status: ProductStatus
+      status: ProductStatus,
+      correlationId: CorrelationId
   ) extends ProductEvent
-  final case class ProductIdentifierAdded(gtin: Gtin) extends ProductEvent
-  final case class ProductAliasAdded(alias: String) extends ProductEvent
+  final case class ProductIdentifierAdded(gtin: Gtin, correlationId: CorrelationId)
+      extends ProductEvent
+  final case class ProductAliasAdded(alias: String, correlationId: CorrelationId)
+      extends ProductEvent
   final case class ListingLinked(
       key: ListingKey,
       confidence: Confidence,
       how: MatchMethod,
-      matcher: MatcherVersion
+      matcher: MatcherVersion,
+      correlationId: CorrelationId
   ) extends ProductEvent
-  final case class ProductMerged(into: ProductId) extends ProductEvent
+  final case class ProductMerged(into: ProductId, correlationId: CorrelationId) extends ProductEvent
   final case class ProductAbsorbed(
       loser: ProductId,
       gtins: Set[Gtin],
       aliases: Set[String],
-      listings: Set[ListingKey]
+      listings: Set[ListingKey],
+      correlationId: CorrelationId
   ) extends ProductEvent
-  final case class ProductDeprecated(reason: String) extends ProductEvent
+  final case class ProductDeprecated(reason: String, correlationId: CorrelationId)
+      extends ProductEvent
 }
 
 /**
@@ -139,7 +148,8 @@ object Product {
                 c.size,
                 c.gtin,
                 c.origin,
-                status
+                status,
+                c.correlationId
               )
             )
           )
@@ -172,29 +182,37 @@ object Product {
         // Idempotent: re-adding a known GTIN is a no-op, not an error. Scrapes
         // repeat, and a repeat must not fail a run.
         if s.gtins.contains(c.gtin) then Right(Nil)
-        else Right(List(ProductEvent.ProductIdentifierAdded(c.gtin)))
+        else Right(List(ProductEvent.ProductIdentifierAdded(c.gtin, c.correlationId)))
 
       case c: ProductCommand.AddAlias =>
         val alias = c.alias.trim
         if alias.isEmpty then Left(DomainError.EmptyName)
         else if s.aliases.contains(alias) then Right(Nil)
-        else Right(List(ProductEvent.ProductAliasAdded(alias)))
+        else Right(List(ProductEvent.ProductAliasAdded(alias, c.correlationId)))
 
       case c: ProductCommand.LinkListing =>
         if s.listings.contains(c.key) then Right(Nil)
-        else Right(List(ProductEvent.ListingLinked(c.key, c.confidence, c.how, c.matcher)))
+        else
+          Right(
+            List(ProductEvent.ListingLinked(c.key, c.confidence, c.how, c.matcher, c.correlationId))
+          )
 
       case c: ProductCommand.MergeInto =>
         if c.canonical == s.id then Left(DomainError.CannotMergeIntoSelf)
-        else Right(List(ProductEvent.ProductMerged(c.canonical)))
+        else Right(List(ProductEvent.ProductMerged(c.canonical, c.correlationId)))
 
       case c: ProductCommand.Absorb =>
         if c.loser == s.id then Left(DomainError.CannotMergeIntoSelf)
-        else Right(List(ProductEvent.ProductAbsorbed(c.loser, c.gtins, c.aliases, c.listings)))
+        else
+          Right(
+            List(
+              ProductEvent.ProductAbsorbed(c.loser, c.gtins, c.aliases, c.listings, c.correlationId)
+            )
+          )
 
       case c: ProductCommand.Deprecate =>
         if s.status == ProductStatus.Deprecated then Left(DomainError.AlreadyDeprecated)
-        else Right(List(ProductEvent.ProductDeprecated(c.reason)))
+        else Right(List(ProductEvent.ProductDeprecated(c.reason, c.correlationId)))
     }
 
   def evolve(state: ProductState, event: ProductEvent): ProductState =

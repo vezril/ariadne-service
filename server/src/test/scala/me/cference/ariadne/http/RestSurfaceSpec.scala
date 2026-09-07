@@ -36,6 +36,9 @@ final class RestSurfaceSpec
     with SprayJsonSupport
     with PostgresFixture {
 
+  /** One correlation id for the whole spec: these tests assert shapes, not tracing. */
+  private val cid = me.cference.ariadne.domain.CorrelationId("c-test")
+
   import JsonFormats.*
 
   // ScalatestRouteTest's default patience is 150ms — far too short for seeding a real
@@ -84,7 +87,8 @@ final class RestSurfaceSpec
           Some(Quantity.unsafe(BigDecimal(454), MeasureUnit.Gram)),
           Some(Gtin.unsafe("4006381333931")),
           Origin.Manual,
-          ProductStatus.Active
+          ProductStatus.Active,
+          cid
         )
       )(using executor)
       .futureValue
@@ -98,7 +102,8 @@ final class RestSurfaceSpec
             Some("Lactantia"),
             listing = Some(ListingKey(StoreId("s-1"), "ext-9"))
           ),
-          List(ScoredCandidate(ProductId("p-1"), Confidence.unsafe(0.81), List("size conflict")))
+          List(ScoredCandidate(ProductId("p-1"), Confidence.unsafe(0.81), List("size conflict"))),
+          cid
         )
       )(using executor)
       .futureValue

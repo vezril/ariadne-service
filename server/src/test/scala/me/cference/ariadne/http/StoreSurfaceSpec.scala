@@ -32,6 +32,9 @@ final class StoreSurfaceSpec
     with SprayJsonSupport
     with PostgresFixture {
 
+  /** One correlation id for the whole spec: these tests assert shapes, not tracing. */
+  private val cid = me.cference.ariadne.domain.CorrelationId("c-test")
+
   import JsonFormats.*
 
   implicit override val patienceConfig: PatienceConfig =
@@ -62,7 +65,7 @@ final class StoreSurfaceSpec
     ProjectionHandlers
       .store(repo)(
         s"store|$id",
-        StoreEvent.StoreRegistered(StoreId(id), name, ChainId(chain), Area(area), None)
+        StoreEvent.StoreRegistered(StoreId(id), name, ChainId(chain), Area(area), None, cid)
       )(using executor)
       .futureValue
 

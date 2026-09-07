@@ -81,21 +81,42 @@ object ResolutionCommand {
   ) extends ResolutionCommand
 }
 
-sealed trait ResolutionEvent extends CborSerializable
+/** Every event carries the correlation id of the command that caused it (§8). */
+sealed trait ResolutionEvent extends CborSerializable {
+  def correlationId: CorrelationId
+}
+
 object ResolutionEvent {
   final case class ResolutionProposed(
       id: ResolutionId,
       subject: MatchSubject,
-      candidates: List[ScoredCandidate]
+      candidates: List[ScoredCandidate],
+      correlationId: CorrelationId
   ) extends ResolutionEvent
-  final case class ObservationParked(observation: ParkedObservation) extends ResolutionEvent
-  final case class ResolutionConfirmed(productId: ProductId, released: List[ParkedObservation])
-      extends ResolutionEvent
-  final case class ResolutionRejected(newProductId: ProductId, released: List[ParkedObservation])
-      extends ResolutionEvent
-  final case class MergeRequested(winner: ProductId, loser: ProductId) extends ResolutionEvent
-  final case class SplitRequested(listing: ListingKey, newProductId: ProductId)
-      extends ResolutionEvent
+  final case class ObservationParked(
+      observation: ParkedObservation,
+      correlationId: CorrelationId
+  ) extends ResolutionEvent
+  final case class ResolutionConfirmed(
+      productId: ProductId,
+      released: List[ParkedObservation],
+      correlationId: CorrelationId
+  ) extends ResolutionEvent
+  final case class ResolutionRejected(
+      newProductId: ProductId,
+      released: List[ParkedObservation],
+      correlationId: CorrelationId
+  ) extends ResolutionEvent
+  final case class MergeRequested(
+      winner: ProductId,
+      loser: ProductId,
+      correlationId: CorrelationId
+  ) extends ResolutionEvent
+  final case class SplitRequested(
+      listing: ListingKey,
+      newProductId: ProductId,
+      correlationId: CorrelationId
+  ) extends ResolutionEvent
 }
 
 /**
@@ -118,7 +139,10 @@ object ResolutionCase {
     (state, cmd) match {
       case (ResolutionState.Empty, c: ResolutionCommand.Propose) =>
         if c.subject.name.isBlank then Left(DomainError.EmptyName)
-        else Right(List(ResolutionEvent.ResolutionProposed(c.id, c.subject, c.candidates)))
+        else
+          Right(
+            List(ResolutionEvent.ResolutionProposed(c.id, c.subject, c.candidates, c.correlationId))
+          )
 
       case (ResolutionState.Empty, _) => Left(DomainError.NotRegistered)
 
@@ -141,7 +165,7 @@ object ResolutionCase {
       case _: ResolutionCommand.Propose => Left(DomainError.AlreadyRegistered)
 
       case c: ResolutionCommand.ParkObservation =>
-        Right(List(ResolutionEvent.ObservationParked(c.observation)))
+        Right(List(ResolutionEvent.ObservationParked(c.observation, c.correlationId)))
 
       case c: ResolutionCommand.Confirm =>
         // Confirm means "this one, of the ones offered". Picking something that was
@@ -149,17 +173,18 @@ object ResolutionCase {
         // Reject is the verb for it.
         if !s.candidates.exists(_.productId == c.productId) then
           Left(DomainError.NotACandidate(c.productId))
-        else Right(List(ResolutionEvent.ResolutionConfirmed(c.productId, s.parked)))
+        else
+          Right(List(ResolutionEvent.ResolutionConfirmed(c.productId, s.parked, c.correlationId)))
 
       case c: ResolutionCommand.Reject =>
-        Right(List(ResolutionEvent.ResolutionRejected(c.newProductId, s.parked)))
+        Right(List(ResolutionEvent.ResolutionRejected(c.newProductId, s.parked, c.correlationId)))
 
       case c: ResolutionCommand.RequestMerge =>
         if c.winner == c.loser then Left(DomainError.CannotMergeIntoSelf)
-        else Right(List(ResolutionEvent.MergeRequested(c.winner, c.loser)))
+        else Right(List(ResolutionEvent.MergeRequested(c.winner, c.loser, c.correlationId)))
 
       case c: ResolutionCommand.RequestSplit =>
-        Right(List(ResolutionEvent.SplitRequested(c.listing, c.newProductId)))
+        Right(List(ResolutionEvent.SplitRequested(c.listing, c.newProductId, c.correlationId)))
     }
 
   def evolve(state: ResolutionState, event: ResolutionEvent): ResolutionState =
