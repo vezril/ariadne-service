@@ -1,12 +1,15 @@
 package me.cference.ariadne.projection
 
 import me.cference.ariadne.domain.price.PriceEvent
+import me.cference.ariadne.domain.purchase.PurchaseEvent
 import me.cference.ariadne.domain.product.ProductEvent
 import me.cference.ariadne.domain.store.StoreEvent
 import me.cference.ariadne.domain.resolution.ResolutionEvent
+import me.cference.ariadne.hermes.{CatalogMessages, CatalogPublisher}
 import me.cference.ariadne.persistence.{
   PriceStreamEntity,
   ProductEntity,
+  PurchaseEntity,
   ResolutionCaseEntity,
   StoreEntity
 }
@@ -91,6 +94,39 @@ object AriadneProjections {
         () => new Handler[PriceEvent]((pid, seq, e) => ProjectionHandlers.price(repo)(pid, seq, e))
     )
 
+  /**
+   * The Hermes publishers (§5) — an event-sourced outbox, not a dual write.
+   *
+   * One projection per entity type, because `eventsBySlices` subscribes by entity type; and each
+   * carries its OWN `ProjectionId`, which is the part that matters operationally. Publisher offsets
+   * must never share a projection id with a read-model offset: Hermes going down would then stall
+   * the read models too, and the REST surface would go stale because a broker was unreachable.
+   * Separate offsets mean a Hermes outage lags exactly one thing.
+   *
+   * The offset advances only AFTER a successful publish, which is what makes this at-least-once
+   * rather than at-most-once — a crash in that window republishes, and the broker collapses the
+   * duplicate on the idempotency key.
+   */
+  def hermesProjection[E](
+      name: String,
+      entityType: String,
+      publisher: CatalogPublisher,
+      map: (String, Long, E) => Option[CatalogMessages.Outgoing],
+      r: Range
+  )(using system: ActorSystem[?], ec: ExecutionContext): Projection[EventEnvelope[E]] =
+    R2dbcProjection.exactlyOnce(
+      projectionId = ProjectionId(name, s"${r.min}-${r.max}"),
+      settings = None,
+      sourceProvider = provider[E](entityType, r),
+      handler = () =>
+        new Handler[E]((pid, seq, e) =>
+          // An event with no message is a deliberate silence (internal bookkeeping no
+          // consumer asked for), and must still advance the offset — treating it as
+          // unpublished would wedge the projection on the first one.
+          map(pid, seq, e).fold(Future.unit)(publisher.publish)
+        )
+    )
+
   def resolutionProjection(repo: ReadModelRepository, r: Range)(using
       system: ActorSystem[?],
       ec: ExecutionContext
@@ -115,24 +151,90 @@ object AriadneProjections {
    * Defining and starting are now the same act. A projection that is not in this list does not
    * exist, rather than existing and quietly doing nothing.
    */
-  def definitions(repo: ReadModelRepository)(using
+  def definitions(
+      repo: ReadModelRepository,
+      hermes: Option[(CatalogPublisher, CatalogMessages.Topics)] = None
+  )(using
       system: ActorSystem[?],
       ec: ExecutionContext
-  ): List[ProjectionDef] =
-    List(
+  ): List[ProjectionDef] = {
+    val readModels = List(
       ProjectionDef("product-catalog", r => ProjectionBehavior(productProjection(repo, r))),
       ProjectionDef("store-coverage", r => ProjectionBehavior(storeProjection(repo, r))),
       ProjectionDef("price-history", r => ProjectionBehavior(priceProjection(repo, r))),
       ProjectionDef("review-queue", r => ProjectionBehavior(resolutionProjection(repo, r)))
     )
+    // The publishers are present only when a broker is configured. Read models are what
+    // the service IS; publishing is what it tells other services, and the first must not
+    // depend on the second.
+    // NOT YET AVAILABLE, and deliberately explicit rather than an inline "".
+    //
+    // §8 promises the journaled correlationId rides every published message, so a
+    // scrape -> resolve -> observe -> deal-alert chain is traceable across services.
+    // It is not implemented: every COMMAND carries a correlationId and `decide` drops
+    // it, so no event in the journal has one to carry. Publishing an empty string is
+    // the honest behaviour until the events carry it; inventing one here would produce
+    // a traceable-looking id that links nothing.
+    val correlationUnavailable = ""
+    val publishers = hermes.toList.flatMap { case (client, topics) =>
+      List(
+        ProjectionDef(
+          "hermes-product",
+          r =>
+            ProjectionBehavior(
+              hermesProjection[ProductEvent](
+                "hermes-product",
+                ProductEntity.EntityPrefix,
+                client,
+                (pid, seq, e) =>
+                  CatalogMessages.product(topics, pid, seq, correlationUnavailable, e),
+                r
+              )
+            )
+        ),
+        ProjectionDef(
+          "hermes-price",
+          r =>
+            ProjectionBehavior(
+              hermesProjection[PriceEvent](
+                "hermes-price",
+                PriceStreamEntity.EntityPrefix,
+                client,
+                (pid, seq, e) => CatalogMessages.price(topics, pid, seq, correlationUnavailable, e),
+                r
+              )
+            )
+        ),
+        ProjectionDef(
+          "hermes-purchase",
+          r =>
+            ProjectionBehavior(
+              hermesProjection[PurchaseEvent](
+                "hermes-purchase",
+                PurchaseEntity.EntityPrefix,
+                client,
+                (pid, seq, e) =>
+                  CatalogMessages.purchase(topics, pid, seq, correlationUnavailable, e),
+                r
+              )
+            )
+        )
+      )
+    }
+    readModels ::: publishers
+  }
 
   /** Start every projection under ShardedDaemonProcess. Call once at boot. */
-  def init(repo: ReadModelRepository, instances: Int = 4)(using
+  def init(
+      repo: ReadModelRepository,
+      hermes: Option[(CatalogPublisher, CatalogMessages.Topics)] = None,
+      instances: Int = 4
+  )(using
       system: ActorSystem[?],
       ec: ExecutionContext
   ): Unit = {
     val rs = ranges(instances)
-    definitions(repo).foreach { d =>
+    definitions(repo, hermes).foreach { d =>
       ShardedDaemonProcess(system).init(
         d.name,
         rs.size,

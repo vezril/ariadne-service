@@ -2,6 +2,7 @@ package me.cference.ariadne.config
 
 import com.typesafe.config.Config
 import me.cference.ariadne.domain.ChainId
+import me.cference.ariadne.hermes.HermesConfig
 import me.cference.ariadne.ingest.flipp.{MerchantId, PostalCode, ScrapeSource}
 import me.cference.ariadne.text.Locale
 
@@ -25,7 +26,7 @@ final case class ScrapeConfig(
     sources: List[ScrapeSource]
 )
 
-final case class AppConfig(http: HttpConfig, scrape: ScrapeConfig)
+final case class AppConfig(http: HttpConfig, scrape: ScrapeConfig, hermes: HermesConfig)
 
 object AppConfig:
 
@@ -34,7 +35,8 @@ object AppConfig:
     val http = raw.getConfig("ariadne.http")
     AppConfig(
       HttpConfig(http.getString("host"), http.getInt("port")),
-      scrape(raw.getConfig("ariadne.scrape"))
+      scrape(raw.getConfig("ariadne.scrape")),
+      HermesConfig.load(raw.getConfig("ariadne.hermes"))
     )
 
   private def scrape(c: Config): ScrapeConfig =
