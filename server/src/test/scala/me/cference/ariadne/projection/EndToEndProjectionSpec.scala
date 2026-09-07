@@ -227,4 +227,75 @@ final class EndToEndProjectionSpec
       }
     }
   }
+
+  "the Hermes publisher" should {
+    "turn a journaled price observation into a published message" in {
+      // The publisher is an outbox PROJECTION, not a dual write: the price is already
+      // committed to the journal before anything is published, so a broker outage can
+      // never cost a fact. This asserts that join — journal to broker — which is the
+      // one the read-model tests above say nothing about.
+      val published = new java.util.concurrent.ConcurrentLinkedQueue[
+        me.cference.ariadne.hermes.CatalogMessages.Outgoing
+      ]()
+      val publisher = new me.cference.ariadne.hermes.CatalogPublisher {
+        def publish(msg: me.cference.ariadne.hermes.CatalogMessages.Outgoing) = {
+          published.add(msg); scala.concurrent.Future.unit
+        }
+      }
+
+      val probe = testKit.createTestProbe[StatusReply[Done]]()
+      val scope = PriceScope.Regional(ChainId("iga"), Area("H9Y"))
+      val entity = testKit.spawn(PriceStreamEntity(ProductId("p-hermes"), scope))
+      val now = Instant.parse("2026-09-07T12:00:00Z")
+      entity ! PriceStreamEntity.Execute(
+        PriceCommand.ObservePrice(
+          ProductId("p-hermes"),
+          scope,
+          Money.unsafe(BigDecimal("3.99")),
+          now,
+          PriceSource.Scrape("flipp", rawResponseId = 5L),
+          None,
+          None,
+          Confidence.Certain,
+          Confidence.Certain,
+          CorrelationId("c-4")
+        ),
+        now,
+        probe.ref
+      )
+      probe.receiveMessage().isSuccess shouldBe true
+
+      val ranges = org.apache.pekko.projection.eventsourced.scaladsl.EventSourcedProvider
+        .sliceRanges(
+          testKit.system,
+          org.apache.pekko.persistence.r2dbc.query.scaladsl.R2dbcReadJournal.Identifier,
+          1
+        )
+
+      val topics = me.cference.ariadne.hermes.CatalogMessages.Topics()
+      projectionTestKit.run(
+        AriadneProjections.hermesProjection[me.cference.ariadne.domain.price.PriceEvent](
+          "hermes-price-test",
+          PriceStreamEntity.EntityPrefix,
+          publisher,
+          (
+              pid,
+              seq,
+              e
+          ) => me.cference.ariadne.hermes.CatalogMessages.price(topics, pid, seq, "", e),
+          ranges.head
+        )
+      ) {
+        val mine = published.toArray.toList
+          .collect { case m: me.cference.ariadne.hermes.CatalogMessages.Outgoing => m }
+          .filter(_.payload.contains("p-hermes"))
+        mine should not be empty
+        mine.head.topic shouldBe "product.price.observed"
+        // The idempotency key the broker dedups a republish on — journal coordinates,
+        // not a minted id.
+        mine.head.messageId should startWith("price|p-hermes|area:iga:H9Y:")
+        mine.head.attributes.get("productId") shouldBe Some("p-hermes")
+      }
+    }
+  }
 }

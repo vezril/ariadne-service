@@ -12,6 +12,7 @@ import me.cference.ariadne.http.{
   StoreRoutes
 }
 import me.cference.ariadne.config.ScrapeConfig
+import me.cference.ariadne.hermes.{CatalogMessages, CatalogPublisher, HermesClient, HermesConfig}
 import me.cference.ariadne.domain.{CorrelationId, StoreId}
 import me.cference.ariadne.domain.price.{PriceCommand, PriceSource}
 import me.cference.ariadne.domain.store.StoreCommand
@@ -78,7 +79,7 @@ object Main:
 
     // Sharding before projections: the projections read the journal these entities write.
     Sharding.init(system)
-    AriadneProjections.init(repo)
+    AriadneProjections.init(repo, hermes(cfg.hermes))
 
     given Timeout = Timeout(5.seconds)
     val decide: (ResolutionId, ResolutionCommand) => Future[Either[String, Unit]] =
@@ -138,6 +139,34 @@ object Main:
         system.terminate()
         System.exit(1)
     }
+
+  /**
+   * Construct the Hermes publisher, or nothing.
+   *
+   * Nothing is built when publishing is off — no client, no channel, no topic calls. A service that
+   * merely COULD publish should not hold a gRPC channel open to a broker it was never pointed at.
+   *
+   * Topic provisioning is fired here and NOT awaited, and that is deliberate: a broker having a bad
+   * morning must not delay the HTTP bind. The publisher projections retry on their own, and a
+   * publish to a topic that does not exist yet fails and is retried — which is the same path as any
+   * other broker outage rather than a special case.
+   */
+  private def hermes(cfg: HermesConfig)(using
+      system: ActorSystem[?]
+  ): Option[(CatalogPublisher, CatalogMessages.Topics)] =
+    if !cfg.enabled then
+      log.info("Hermes publishing disabled (ariadne.hermes.enabled=false)")
+      None
+    else
+      val client = new HermesClient(cfg)
+      client.provisionTopics(cfg.topics.all)
+      log.info(
+        "Hermes publishing enabled — {}:{}, topics: {}",
+        cfg.host,
+        Integer.valueOf(cfg.port),
+        cfg.topics.all.mkString(", ")
+      )
+      Some(client -> cfg.topics)
 
   /**
    * Wire the scraping policy (§2.3) to the real world — HTTP, the archive, the resolver, and the
