@@ -921,12 +921,25 @@ candidate lists prove insufficient against real receipts, not before.
 
 ## 8. Cross-cutting
 
-- **Correlation-id (HermesMQ v1.13.0 discipline):** adopt from incoming gRPC metadata / REST
-  header / Hermes message when present, mint (ULID) at every edge otherwise; journal it on every
+- **Correlation-id — JOURNALLED ON EVERY EVENT, 2026-09-07.** Adopt from incoming gRPC metadata /
+  REST header / Hermes message when present, mint at every edge otherwise; journal it on every
   event; echo it on every response and every published message; MDC-propagated into logs
   (Apollo's `tracing/CorrelationId` + `MdcPropagatingExecutionContext` pattern). A flyer scrape
   is an edge → each scrape run mints one cid, so listing→resolution→observation→Demeter-alert is
   one traceable thread.
+
+  **This claim was false for weeks, and nothing failed.** Every *command* carried a
+  `correlationId` and `decide` dropped it, so no event in the journal had one — the trace stopped
+  dead at the write boundary while §8 said otherwise. Found 2026-09-07 while building the Hermes
+  publisher, which needed to read the id off a committed event and found nothing there.
+
+  It is now a **field on every journaled event**. Pekko 1.2.0 exposes no user event-metadata API
+  (`persistWithMetadata` does not exist there), so a field is the mechanism rather than a choice.
+  `StoreDeactivated` became a case class for it: a parameterless event cannot carry the correlation
+  that caused it, and "every event except that one" is the kind of exception that quietly becomes a
+  gap in a trace. `CorrelationPropagationSpec` asserts it per aggregate rather than spot-checking
+  one — a single check would pass while three aggregates dropped it, which is the state this was
+  actually in.
 - **Health/metrics:** `/health` liveness + readiness (journal, projection lag, Hermes lag);
   `/metrics` Prometheus with Hera scrape annotations. Key gauges/counters: observations appended
   (by source), resolver outcomes (by band and by `matcher_version` — the

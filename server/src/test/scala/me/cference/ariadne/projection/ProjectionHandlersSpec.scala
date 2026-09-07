@@ -23,6 +23,9 @@ final class ProjectionHandlersSpec
     with ScalaFutures
     with PostgresFixture {
 
+  /** One correlation id for the whole spec: these tests assert shapes, not tracing. */
+  private val cid = me.cference.ariadne.domain.CorrelationId("c-test")
+
   implicit override val patienceConfig: PatienceConfig =
     PatienceConfig(timeout = Span(10, Seconds), interval = Span(50, Millis))
 
@@ -70,7 +73,8 @@ final class ProjectionHandlersSpec
           Some(Quantity.unsafe(BigDecimal(454), MeasureUnit.Gram)),
           Some(Gtin.unsafe("4006381333931")),
           Origin.Manual,
-          ProductStatus.Active
+          ProductStatus.Active,
+          cid
         )
       )
       scalar("SELECT name FROM products WHERE id = 'p-1'") shouldBe Some("Lactantia Butter")
@@ -87,7 +91,8 @@ final class ProjectionHandlersSpec
           ListingKey(StoreId("s-1"), "ext-9"),
           Confidence.unsafe(0.93),
           MatchMethod.Fuzzy,
-          MatcherVersion("v1")
+          MatcherVersion("v1"),
+          cid
         )
       )
       scalar(
@@ -109,10 +114,11 @@ final class ProjectionHandlersSpec
           None,
           None,
           Origin.Manual,
-          ProductStatus.Active
+          ProductStatus.Active,
+          cid
         )
       )
-      onProduct("p-2", ProductEvent.ProductMerged(ProductId("p-1")))
+      onProduct("p-2", ProductEvent.ProductMerged(ProductId("p-1"), cid))
 
       // The row SURVIVES — Dionysus and Demeter hold ids we do not control.
       scalar("SELECT status FROM products WHERE id = 'p-2'") shouldBe Some("MergedInto")
@@ -123,7 +129,7 @@ final class ProjectionHandlersSpec
       val moved = Gtin.unsafe("036000291452")
       onProduct(
         "p-1",
-        ProductEvent.ProductAbsorbed(ProductId("p-2"), Set(moved), Set("beurre"), Set.empty)
+        ProductEvent.ProductAbsorbed(ProductId("p-2"), Set(moved), Set("beurre"), Set.empty, cid)
       )
       scalar(s"SELECT product_id FROM product_gtins WHERE gtin = '${moved.value}'") shouldBe Some(
         "p-1"
@@ -144,27 +150,28 @@ final class ProjectionHandlersSpec
           "IGA Plateau",
           ChainId("iga"),
           Area("H2X"),
-          Some("Plateau")
+          Some("Plateau"),
+          cid
         )
       )
       scalar("SELECT chain_id FROM store_coverage WHERE store_id = 's-1'") shouldBe Some("iga")
     }
 
     "apply a PARTIAL update without blanking untouched fields" in {
-      onStore("s-1", StoreEvent.StoreDetailsUpdated(Some("IGA Plateau Est"), None, None))
+      onStore("s-1", StoreEvent.StoreDetailsUpdated(Some("IGA Plateau Est"), None, None, cid))
       scalar("SELECT name FROM stores WHERE id = 's-1'") shouldBe Some("IGA Plateau Est")
       scalar("SELECT area FROM stores WHERE id = 's-1'") shouldBe Some("H2X") // untouched
       scalar("SELECT label FROM stores WHERE id = 's-1'") shouldBe Some("Plateau") // untouched
     }
 
     "move coverage when the area changes, so the fan-out follows the store" in {
-      onStore("s-1", StoreEvent.StoreDetailsUpdated(None, Some(Area("H2T")), None))
+      onStore("s-1", StoreEvent.StoreDetailsUpdated(None, Some(Area("H2T")), None, cid))
       scalar("SELECT area FROM store_coverage WHERE store_id = 's-1'") shouldBe Some("H2T")
     }
 
     "stop covering a deactivated store but KEEP its row" in {
       // Its price and purchase history still reference it; deleting would orphan facts.
-      onStore("s-1", StoreEvent.StoreDeactivated)
+      onStore("s-1", StoreEvent.StoreDeactivated(cid))
       scalar("SELECT active FROM stores WHERE id = 's-1'") shouldBe Some("f")
       scalar("SELECT store_id FROM store_coverage WHERE store_id = 's-1'") shouldBe None
     }
@@ -175,7 +182,14 @@ final class ProjectionHandlersSpec
     "write history and current price for a regional observation" in {
       onStore(
         "s-20",
-        StoreEvent.StoreRegistered(StoreId("s-20"), "IGA NDG", ChainId("iga"), Area("H4A"), None)
+        StoreEvent.StoreRegistered(
+          StoreId("s-20"),
+          "IGA NDG",
+          ChainId("iga"),
+          Area("H4A"),
+          None,
+          cid
+        )
       )
       onPrice(
         "price|p-1|area:iga:H4A",
@@ -189,7 +203,8 @@ final class ProjectionHandlersSpec
           Confidence.Certain,
           Confidence.unsafe(0.4),
           now,
-          PriceSource.Scrape("flipp", rawResponseId = 1L)
+          PriceSource.Scrape("flipp", rawResponseId = 1L),
+          cid
         )
       )
       scalar(
@@ -218,7 +233,8 @@ final class ProjectionHandlersSpec
           Confidence.Certain,
           Confidence.Certain,
           now,
-          PriceSource.Purchase(PurchaseId("pu-1"))
+          PriceSource.Purchase(PurchaseId("pu-1")),
+          cid
         )
       )
       val resolved =
@@ -238,7 +254,8 @@ final class ProjectionHandlersSpec
         Confidence.Certain,
         Confidence.Certain,
         now,
-        PriceSource.Manual
+        PriceSource.Manual,
+        cid
       )
       onPrice("price|p-9|store:s-20", 5, e)
       onPrice("price|p-9|store:s-20", 5, e)

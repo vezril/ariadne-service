@@ -24,8 +24,8 @@ final class ResolutionCaseSpec extends AnyFunSuite with Matchers {
 
   private def pending(parked: List[ParkedObservation] = Nil): ResolutionState =
     ResolutionCase.replay(
-      ResolutionEvent.ResolutionProposed(rid, subject, List(candidateA, candidateB)) ::
-        parked.map(ResolutionEvent.ObservationParked.apply)
+      ResolutionEvent.ResolutionProposed(rid, subject, List(candidateA, candidateB), cid) ::
+        parked.map(ResolutionEvent.ObservationParked(_, cid))
     )
 
   test("a proposal opens a pending case carrying its candidates") {
@@ -118,7 +118,7 @@ final class ResolutionCaseSpec extends AnyFunSuite with Matchers {
     // Same stance as voiding a purchase rather than editing it.
     val decided = ResolutionCase.evolve(
       pending(List(observation("4.99"))),
-      ResolutionEvent.ResolutionConfirmed(ProductId("p-a"), List(observation("4.99")))
+      ResolutionEvent.ResolutionConfirmed(ProductId("p-a"), List(observation("4.99")), cid)
     )
     ResolutionCase.decide(decided, ResolutionCommand.Confirm(ProductId("p-b"), cid)) shouldBe
       Left(DomainError.AlreadyResolved)
@@ -148,9 +148,9 @@ final class ResolutionCaseSpec extends AnyFunSuite with Matchers {
 
   test("replay reproduces state exactly") {
     val events = List(
-      ResolutionEvent.ResolutionProposed(rid, subject, List(candidateA)),
-      ResolutionEvent.ObservationParked(observation("4.99")),
-      ResolutionEvent.ResolutionConfirmed(ProductId("p-a"), List(observation("4.99")))
+      ResolutionEvent.ResolutionProposed(rid, subject, List(candidateA), cid),
+      ResolutionEvent.ObservationParked(observation("4.99"), cid),
+      ResolutionEvent.ResolutionConfirmed(ProductId("p-a"), List(observation("4.99")), cid)
     )
     ResolutionCase.replay(events) shouldBe
       events.foldLeft[ResolutionState](ResolutionState.Empty)(ResolutionCase.evolve)

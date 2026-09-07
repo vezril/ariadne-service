@@ -72,7 +72,8 @@ final class PurchaseSpec extends AnyFunSuite with Matchers {
           now,
           List(line("1.00")),
           Money.unsafe(BigDecimal("1.00")),
-          PurchaseSource.Manual
+          PurchaseSource.Manual,
+          cid
         )
       )
     )
@@ -80,7 +81,7 @@ final class PurchaseSpec extends AnyFunSuite with Matchers {
       .decide(recorded, PurchaseCommand.VoidPurchase("wrong store", cid), now)
       .map(_.size) shouldBe Right(1)
 
-    val voided = Purchase.evolve(recorded, PurchaseEvent.PurchaseVoided("wrong store"))
+    val voided = Purchase.evolve(recorded, PurchaseEvent.PurchaseVoided("wrong store", cid))
     voided match {
       case s: PurchaseState.Recorded =>
         s.voided shouldBe true
@@ -128,7 +129,8 @@ final class PurchaseSpec extends AnyFunSuite with Matchers {
           now,
           List(line("1.00")),
           Money.unsafe(BigDecimal("1.00")),
-          PurchaseSource.Manual
+          PurchaseSource.Manual,
+          cid
         )
       )
     )

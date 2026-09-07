@@ -27,6 +27,9 @@ final class ResolverSpec
     with ScalaFutures
     with PostgresFixture {
 
+  /** One correlation id for the whole spec: these tests assert shapes, not tracing. */
+  private val cid = me.cference.ariadne.domain.CorrelationId("c-test")
+
   implicit override val patienceConfig: PatienceConfig =
     PatienceConfig(timeout = Span(15, Seconds), interval = Span(50, Millis))
 
@@ -67,7 +70,8 @@ final class ResolverSpec
           size,
           gtin,
           Origin.Manual,
-          ProductStatus.Active
+          ProductStatus.Active,
+          cid
         )
       )
       .futureValue
@@ -127,7 +131,7 @@ final class ResolverSpec
         Some(Gtin.unsafe("96385074"))
       )
       ProjectionHandlers
-        .product(repo)("product|dup-1", ProductEvent.ProductMerged(ProductId("lac-454")))
+        .product(repo)("product|dup-1", ProductEvent.ProductMerged(ProductId("lac-454"), cid))
         .futureValue
 
       val out =
