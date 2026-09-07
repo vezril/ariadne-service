@@ -10,7 +10,7 @@ import me.cference.ariadne.persistence.{
   ResolutionCaseEntity,
   StoreEntity
 }
-import org.apache.pekko.actor.typed.ActorSystem
+import org.apache.pekko.actor.typed.{ActorSystem, Behavior}
 import org.apache.pekko.cluster.sharding.typed.ShardedDaemonProcessSettings
 import org.apache.pekko.cluster.sharding.typed.scaladsl.ShardedDaemonProcess
 import org.apache.pekko.persistence.query.Offset
@@ -103,32 +103,55 @@ object AriadneProjections {
         new Handler[ResolutionEvent]((pid, _, e) => ProjectionHandlers.resolution(repo)(pid, e))
     )
 
+  /**
+   * Every projection this service runs, in one list.
+   *
+   * The list is the point. `resolutionProjection` was defined and never started — `init` had three
+   * hand-written `ShardedDaemonProcess.init` blocks and the review queue was not one of them, so
+   * cases were journaled correctly and never projected, and `GET /api/v1/resolutions` answered
+   * empty forever. It shipped in v0.1.0. Every test passed, because they all invoke the HANDLERS
+   * directly; nothing asserted the set of daemons that actually start.
+   *
+   * Defining and starting are now the same act. A projection that is not in this list does not
+   * exist, rather than existing and quietly doing nothing.
+   */
+  def definitions(repo: ReadModelRepository)(using
+      system: ActorSystem[?],
+      ec: ExecutionContext
+  ): List[ProjectionDef] =
+    List(
+      ProjectionDef("product-catalog", r => ProjectionBehavior(productProjection(repo, r))),
+      ProjectionDef("store-coverage", r => ProjectionBehavior(storeProjection(repo, r))),
+      ProjectionDef("price-history", r => ProjectionBehavior(priceProjection(repo, r))),
+      ProjectionDef("review-queue", r => ProjectionBehavior(resolutionProjection(repo, r)))
+    )
+
   /** Start every projection under ShardedDaemonProcess. Call once at boot. */
   def init(repo: ReadModelRepository, instances: Int = 4)(using
       system: ActorSystem[?],
       ec: ExecutionContext
   ): Unit = {
     val rs = ranges(instances)
-    ShardedDaemonProcess(system).init(
-      "product-catalog",
-      rs.size,
-      i => ProjectionBehavior(productProjection(repo, rs(i))),
-      ShardedDaemonProcessSettings(system),
-      Some(ProjectionBehavior.Stop)
-    )
-    ShardedDaemonProcess(system).init(
-      "store-coverage",
-      rs.size,
-      i => ProjectionBehavior(storeProjection(repo, rs(i))),
-      ShardedDaemonProcessSettings(system),
-      Some(ProjectionBehavior.Stop)
-    )
-    ShardedDaemonProcess(system).init(
-      "price-history",
-      rs.size,
-      i => ProjectionBehavior(priceProjection(repo, rs(i))),
-      ShardedDaemonProcessSettings(system),
-      Some(ProjectionBehavior.Stop)
-    )
+    definitions(repo).foreach { d =>
+      ShardedDaemonProcess(system).init(
+        d.name,
+        rs.size,
+        i => d.behavior(rs(i)),
+        ShardedDaemonProcessSettings(system),
+        Some(ProjectionBehavior.Stop)
+      )
+    }
   }
+
+  /**
+   * One projection, named and startable.
+   *
+   * The behaviour is built per slice range and its event type is erased here deliberately: the four
+   * projections fold different events, and the only thing `init` needs from them is a `Behavior` it
+   * can supervise. Erasing at this boundary is what lets them live in one list at all.
+   */
+  final case class ProjectionDef(
+      name: String,
+      behavior: Range => Behavior[ProjectionBehavior.Command]
+  )
 }

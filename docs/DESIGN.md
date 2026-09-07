@@ -517,6 +517,19 @@ All read models are **Pekko Projections over the Postgres journal — rebuildabl
 replay** (drop tables + reset offsets = full rebuild; this is the recovery story and also the
 schema-evolution story for read models). Offsets in the standard projection offset table.
 
+**Defining a projection and STARTING it are one act (fixed v0.1.1).** `AriadneProjections` holds a
+single `definitions` list that `init` iterates; a projection absent from that list does not exist.
+This was a bug before it was a principle: `resolutionProjection` was written, folded correctly, and
+never appeared in `init`'s three hand-written `ShardedDaemonProcess` blocks. Cases were journaled
+and never projected, so `GET /api/v1/resolutions` answered empty forever — ariadne-ui's whole
+reason to exist, silently inert, shipped in v0.1.0.
+
+Nothing failed. Every test passed, because they all exercise the HANDLERS directly; the handler had
+coverage and the REGISTRATION had none. `ProjectionRegistrationSpec` now asserts the registry
+against reflection over the object's own methods, so a fifth projection that is defined and not
+listed fails there — the same fail-closed discipline as the OpenAPI drift gate, applied to the seam
+that gate did not cover.
+
 | Projection | Source streams | Tables (sketch) | Serves |
 |---|---|---|---|
 | **product-catalog** | Product, Store | `products(id, name, brand, category, size, status, merged_into)` · `product_gtins(gtin→product_id)` · `product_aliases` · `product_listings(store_id, external_id → product_id)` · `stores` | GetProduct / ListProducts / SearchProducts; redirect-following for merged ids |

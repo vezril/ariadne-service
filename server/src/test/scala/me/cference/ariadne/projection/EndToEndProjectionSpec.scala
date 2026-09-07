@@ -5,11 +5,18 @@ import io.r2dbc.postgresql.{PostgresqlConnectionConfiguration, PostgresqlConnect
 import me.cference.ariadne.domain.*
 import me.cference.ariadne.domain.price.{PriceCommand, PriceSource}
 import me.cference.ariadne.domain.store.StoreCommand
-import me.cference.ariadne.persistence.{PriceStreamEntity, StoreEntity}
+import me.cference.ariadne.domain.resolution.{
+  MatchSubject,
+  ResolutionCommand,
+  ResolutionId,
+  ScoredCandidate
+}
+import me.cference.ariadne.persistence.{PriceStreamEntity, ResolutionCaseEntity, StoreEntity}
 import org.apache.pekko.Done
 import org.apache.pekko.actor.testkit.typed.scaladsl.ScalaTestWithActorTestKit
 import org.apache.pekko.pattern.StatusReply
 import org.apache.pekko.projection.testkit.scaladsl.ProjectionTestKit
+import org.scalatest.OptionValues
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpecLike
 
@@ -69,7 +76,8 @@ object EndToEndProjectionSpec {
 final class EndToEndProjectionSpec
     extends ScalaTestWithActorTestKit(EndToEndProjectionSpec.config)
     with AnyWordSpecLike
-    with Matchers {
+    with Matchers
+    with OptionValues {
 
   private given ExecutionContext = testKit.system.executionContext
   private given org.apache.pekko.actor.typed.ActorSystem[?] = testKit.system
@@ -179,6 +187,43 @@ final class EndToEndProjectionSpec
         // The scope must NOT have degraded to a store fact along the way.
         scalar("SELECT store_id FROM price_history WHERE product_id = 'p-e2e'") shouldBe None
         scalar("SELECT chain_id FROM price_history WHERE product_id = 'p-e2e'") shouldBe Some("iga")
+      }
+    }
+  }
+
+  "a proposed resolution case" should {
+    "reach the review queue — the leg that was never wired, and never tested" in {
+      // This projection existed, folded correctly, and was never STARTED (v0.1.0). Its
+      // handler had unit coverage; this join did not, so nothing noticed that a case
+      // could be journaled and never appear in the queue a human works from.
+      val probe = testKit.createTestProbe[StatusReply[Done]]()
+      val entity = testKit.spawn(ResolutionCaseEntity("r-e2e"))
+      entity ! ResolutionCaseEntity.Execute(
+        ResolutionCommand.Propose(
+          ResolutionId("r-e2e"),
+          MatchSubject("Lactantia Butter", Some("Lactantia")),
+          List(ScoredCandidate(ProductId("p-e2e"), Confidence.unsafe(0.81), List("size conflict"))),
+          CorrelationId("c-3")
+        ),
+        probe.ref
+      )
+      probe.receiveMessage().isSuccess shouldBe true
+
+      val ranges = org.apache.pekko.projection.eventsourced.scaladsl.EventSourcedProvider
+        .sliceRanges(
+          testKit.system,
+          org.apache.pekko.persistence.r2dbc.query.scaladsl.R2dbcReadJournal.Identifier,
+          1
+        )
+
+      projectionTestKit.run(AriadneProjections.resolutionProjection(repo, ranges.head)) {
+        scalar("SELECT subject_name FROM resolution_cases WHERE id = 'r-e2e'") shouldBe
+          Some("Lactantia Butter")
+        // The candidates the matcher offered must survive intact: a human decides
+        // against THESE, and re-deriving them later could show something else (§6.6).
+        scalar("SELECT candidates FROM resolution_cases WHERE id = 'r-e2e'").value should include(
+          "p-e2e"
+        )
       }
     }
   }
