@@ -8,13 +8,15 @@ import me.cference.ariadne.http.{
   HealthRoutes,
   HelloRoutes,
   HttpServer,
+  PurchaseRoutes,
   ReviewRoutes,
   StoreRoutes
 }
 import me.cference.ariadne.config.ScrapeConfig
 import me.cference.ariadne.hermes.{CatalogMessages, CatalogPublisher, HermesClient, HermesConfig}
-import me.cference.ariadne.domain.{CorrelationId, StoreId}
+import me.cference.ariadne.domain.{CorrelationId, PriceScope, ProductId, PurchaseId, StoreId}
 import me.cference.ariadne.domain.price.{PriceCommand, PriceSource}
+import me.cference.ariadne.domain.purchase.PurchaseCommand
 import me.cference.ariadne.domain.store.StoreCommand
 import me.cference.ariadne.domain.resolution.{ResolutionCommand, ResolutionId}
 import me.cference.ariadne.ingest.PostgresRawArchive
@@ -32,6 +34,7 @@ import me.cference.ariadne.ingest.http.{
 }
 import me.cference.ariadne.persistence.{
   PriceStreamEntity,
+  PurchaseEntity,
   ResolutionCaseEntity,
   SchemaMigration,
   Sharding,
@@ -42,6 +45,8 @@ import me.cference.ariadne.resolver.{ResolutionService, Resolver, StoreResolver}
 import io.r2dbc.postgresql.{PostgresqlConnectionConfiguration, PostgresqlConnectionFactory}
 import org.apache.pekko.Done
 import org.apache.pekko.util.Timeout
+
+import java.time.Instant
 import com.typesafe.config.ConfigFactory
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import org.apache.pekko.actor.typed.ActorSystem
@@ -79,7 +84,6 @@ object Main:
 
     // Sharding before projections: the projections read the journal these entities write.
     Sharding.init(system)
-    AriadneProjections.init(repo, hermes(cfg.hermes))
 
     given Timeout = Timeout(5.seconds)
     val decide: (ResolutionId, ResolutionCommand) => Future[Either[String, Unit]] =
@@ -104,6 +108,42 @@ object Main:
             Left(e.getMessage)
           }
 
+    val purchaseDecide: (PurchaseId, PurchaseCommand) => Future[Either[String, Unit]] =
+      (id, cmd) =>
+        Sharding
+          .purchase(system, id.value)
+          .askWithStatus[Done](PurchaseEntity.Execute(cmd, Instant.now(), _))
+          .map(_ => Right(()))
+          .recover { case e: org.apache.pekko.pattern.StatusReply.ErrorMessage =>
+            Left(e.getMessage)
+          }
+
+    // §2.4's price-append policy sends ObservePrice to the price stream for the product x
+    // store the line names. A domain refusal here is NOT recoverable by the projection, so
+    // it is logged and the offset advances: a single bad line must not wedge the process
+    // manager and stall every later receipt behind it. The purchase itself is already
+    // journaled, so the fact is never lost — only its price echo is, and visibly.
+    val observePrice: (ProductId, PriceScope, PriceCommand) => Future[Unit] =
+      (productId, scope, cmd) =>
+        Sharding
+          .price(system, productId, scope)
+          .askWithStatus[Done](PriceStreamEntity.Execute(cmd, Instant.now(), _))
+          .map(_ => ())
+          .recover { case e: org.apache.pekko.pattern.StatusReply.ErrorMessage =>
+            system.log.warn(
+              "price-append refused for product {} at {}: {}",
+              productId.value,
+              scope.key,
+              e.getMessage
+            )
+            ()
+          }
+
+    // Projections start AFTER the asks they need exist. The price-append process manager
+    // sends commands rather than writing a table, so unlike the read models it cannot be
+    // started before sharding has something to ask.
+    AriadneProjections.init(repo, hermes(cfg.hermes), Some(observePrice))
+
     // One ResolutionService for both callers. The scrape run uses `resolveForScrape`
     // (Path A: auto-create on NoMatch); the REST surface uses `resolveAndReview`
     // (Path B: never auto-create — a human is right there, and §6.4 says they register
@@ -120,6 +160,7 @@ object Main:
         new CatalogRoutes(repo, resolution.resolveAndReview).routes ~
         new ReviewRoutes(repo, decide).routes ~
         new StoreRoutes(repo, new StoreResolver(repo), storeDecide).routes ~
+        new PurchaseRoutes(purchaseDecide).routes ~
         new DocsRoutes().routes
 
     HttpServer.bind(routes, cfg.http.host, cfg.http.port).onComplete {

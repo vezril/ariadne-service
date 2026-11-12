@@ -173,6 +173,48 @@ collection:
             }
         headers:
           - { name: Content-Type, value: application/json }
+  - name: purchases
+    meta: { id: fld_purchases, sortKey: -2.4 }
+    children:
+      - name: Record a purchase
+        meta: { id: req_record_purchase, sortKey: -10 }
+        method: POST
+        url: "{{ _.base }}/api/v1/purchases"
+        body:
+          mimeType: application/json
+          text: |-
+            {
+              "id": "{{ _.purchaseId }}",
+              "storeId": "{{ _.storeId }}",
+              "purchasedAt": "2026-11-10T14:30:00Z",
+              "lines": [
+                { "productId": "{{ _.productId }}", "quantity": "1", "pricePaid": "4.99", "lineTotal": "4.99" }
+              ],
+              "total": "4.99",
+              "source": "manual"
+            }
+        headers:
+          - { name: Content-Type, value: application/json }
+          - { name: X-Correlation-Id, value: "{{ _.correlationId }}" }
+        description: >-
+          Send this one TWICE. The second call is 202, not 409 — an identical re-record is a no-op
+          success, which is what lets a client's write-ahead outbox drain (§7.1). Change the total
+          and send it again under the same id and it becomes 409: that is an id collision, not a
+          retry. Money is a decimal string throughout; each line also becomes a price fact at
+          exact{storeId} with source=purchase (§2.4).
+      - name: Void a purchase
+        meta: { id: req_void_purchase, sortKey: -9 }
+        method: POST
+        url: "{{ _.base }}/api/v1/purchases/{{ _.purchaseId }}/void"
+        body:
+          mimeType: application/json
+          text: |-
+            { "reason": "wrong store" }
+        headers:
+          - { name: Content-Type, value: application/json }
+        description: >-
+          Corrections are new facts, not edits — both events persist. This does NOT retract the
+          price facts the purchase produced: the price paid was still paid.
   - name: ops
     meta: { id: fld_ops, sortKey: -3 }
     children:
@@ -192,4 +234,5 @@ environments:
     productId: p-1
     storeId: s-1
     caseId: r-1
+    purchaseId: pur-1
     correlationId: insomnia-local
