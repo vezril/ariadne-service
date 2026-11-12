@@ -44,11 +44,20 @@ final class ProjectionRegistrationSpec extends AnyWordSpec with Matchers {
       scala.concurrent.Future.unit
   }
 
-  private def names(hermes: Boolean): List[String] =
+  /** Never invoked; it exists only so the process manager is DEFINED. */
+  private val stubObserve: (
+      me.cference.ariadne.domain.ProductId,
+      me.cference.ariadne.domain.PriceScope,
+      me.cference.ariadne.domain.price.PriceCommand
+  ) => scala.concurrent.Future[Unit] =
+    (_, _, _) => scala.concurrent.Future.unit
+
+  private def names(hermes: Boolean, observe: Boolean = true): List[String] =
     AriadneProjections
       .definitions(
         null,
-        Option.when(hermes)(stubPublisher -> CatalogMessages.Topics())
+        Option.when(hermes)(stubPublisher -> CatalogMessages.Topics()),
+        Option.when(observe)(stubObserve)
       )(using null, summon[scala.concurrent.ExecutionContext])
       .map(_.name)
 
@@ -89,6 +98,20 @@ final class ProjectionRegistrationSpec extends AnyWordSpec with Matchers {
 
     "register the review queue — the one that was missing" in {
       registered should contain("review-queue")
+    }
+
+    "register the price-append process manager" in {
+      // §2.4's policy is standing, not optional: without this daemon a receipt is
+      // journaled and its prices — the best facts the catalog gets — are never appended.
+      // The failure mode is the review queue's exactly: correct journal, silent policy.
+      registered should contain("purchase-price-append")
+    }
+
+    "keep the process manager on its own offset, away from the read models" in {
+      // It SENDS commands rather than writing a table, so a price entity being slow must
+      // not stall the catalogue the REST surface reads.
+      val readModels = Set("product-catalog", "store-coverage", "price-history", "review-queue")
+      readModels should not contain "purchase-price-append"
     }
 
     "register every read model the REST surface reads from" in {
