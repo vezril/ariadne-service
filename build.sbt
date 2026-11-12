@@ -45,7 +45,12 @@ lazy val pekkoHttpVersion = "1.2.0"
 // r2dbc 1.1.x) does not create a mixed-version classpath — Pekko forbids that.
 lazy val pekkoR2dbcVersion = "1.1.0"
 lazy val pekkoProjectionVersion = "1.1.0"
-lazy val testcontainersVersion = "0.41.4"
+// 0.41.4's bundled docker-java negotiates Docker API 1.32, which the runners'
+// daemon now rejects outright ("client version 1.32 is too old. Minimum
+// supported API version is 1.40"), aborting every container suite before it
+// starts. 0.43.0 ships a docker-java new enough to negotiate a supported
+// version. Not a code problem — the pin aged out from under us.
+lazy val testcontainersVersion = "0.43.0"
 lazy val circeVersion = "0.14.10"
 lazy val scalaTestVersion = "3.2.19"
 lazy val scalaCheckPlusVersion = "3.2.19.0"
