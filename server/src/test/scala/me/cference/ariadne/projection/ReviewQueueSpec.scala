@@ -21,6 +21,9 @@ final class ReviewQueueSpec
     with ScalaFutures
     with PostgresFixture {
 
+  /** One correlation id for the whole spec: these tests assert shapes, not tracing. */
+  private val cid = me.cference.ariadne.domain.CorrelationId("c-test")
+
   implicit override val patienceConfig: PatienceConfig =
     PatienceConfig(timeout = Span(10, Seconds), interval = Span(50, Millis))
 
@@ -62,7 +65,7 @@ final class ReviewQueueSpec
   "a proposed case" should {
 
     "appear in the queue with its subject and candidates" in {
-      on("r-1", ResolutionEvent.ResolutionProposed(ResolutionId("r-1"), subject, candidates))
+      on("r-1", ResolutionEvent.ResolutionProposed(ResolutionId("r-1"), subject, candidates, cid))
       scalar("SELECT state FROM resolution_cases WHERE id = 'r-1'") shouldBe Some("pending")
       scalar("SELECT subject_brand FROM resolution_cases WHERE id = 'r-1'") shouldBe Some(
         "Lactantia"
@@ -95,8 +98,8 @@ final class ReviewQueueSpec
         Confidence.Certain,
         Confidence.Certain
       )
-      on("r-1", ResolutionEvent.ObservationParked(parked))
-      on("r-1", ResolutionEvent.ObservationParked(parked))
+      on("r-1", ResolutionEvent.ObservationParked(parked, cid))
+      on("r-1", ResolutionEvent.ObservationParked(parked, cid))
       scalar("SELECT parked_count FROM resolution_cases WHERE id = 'r-1'") shouldBe Some("2")
     }
   }
@@ -104,7 +107,7 @@ final class ReviewQueueSpec
   "a decided case" should {
 
     "leave the pending queue and record what was decided" in {
-      on("r-1", ResolutionEvent.ResolutionConfirmed(ProductId("p-a"), Nil))
+      on("r-1", ResolutionEvent.ResolutionConfirmed(ProductId("p-a"), Nil, cid))
       scalar("SELECT state FROM resolution_cases WHERE id = 'r-1'") shouldBe Some("resolved")
       scalar("SELECT outcome FROM resolution_cases WHERE id = 'r-1'") shouldBe Some("Confirmed:p-a")
       scalar("SELECT decided_at IS NOT NULL FROM resolution_cases WHERE id = 'r-1'") shouldBe Some(
@@ -114,20 +117,20 @@ final class ReviewQueueSpec
     }
 
     "record each terminal verb distinguishably" in {
-      on("r-2", ResolutionEvent.ResolutionProposed(ResolutionId("r-2"), subject, Nil))
-      on("r-2", ResolutionEvent.ResolutionRejected(ProductId("p-new"), Nil))
+      on("r-2", ResolutionEvent.ResolutionProposed(ResolutionId("r-2"), subject, Nil, cid))
+      on("r-2", ResolutionEvent.ResolutionRejected(ProductId("p-new"), Nil, cid))
       scalar("SELECT outcome FROM resolution_cases WHERE id = 'r-2'") shouldBe Some(
         "NewProduct:p-new"
       )
 
-      on("r-3", ResolutionEvent.ResolutionProposed(ResolutionId("r-3"), subject, Nil))
-      on("r-3", ResolutionEvent.MergeRequested(ProductId("w"), ProductId("l")))
+      on("r-3", ResolutionEvent.ResolutionProposed(ResolutionId("r-3"), subject, Nil, cid))
+      on("r-3", ResolutionEvent.MergeRequested(ProductId("w"), ProductId("l"), cid))
       scalar("SELECT outcome FROM resolution_cases WHERE id = 'r-3'") shouldBe Some("Merged:w<-l")
 
-      on("r-4", ResolutionEvent.ResolutionProposed(ResolutionId("r-4"), subject, Nil))
+      on("r-4", ResolutionEvent.ResolutionProposed(ResolutionId("r-4"), subject, Nil, cid))
       on(
         "r-4",
-        ResolutionEvent.SplitRequested(ListingKey(StoreId("s-1"), "e-1"), ProductId("p-split"))
+        ResolutionEvent.SplitRequested(ListingKey(StoreId("s-1"), "e-1"), ProductId("p-split"), cid)
       )
       scalar("SELECT outcome FROM resolution_cases WHERE id = 'r-4'") shouldBe Some("Split:p-split")
     }
@@ -142,7 +145,7 @@ final class ReviewQueueSpec
         Confidence.unsafe(0.7),
         List("""a "quoted" note""")
       )
-      on("r-5", ResolutionEvent.ResolutionProposed(ResolutionId("r-5"), subject, List(nasty)))
+      on("r-5", ResolutionEvent.ResolutionProposed(ResolutionId("r-5"), subject, List(nasty), cid))
       scalar("SELECT candidates->0->>'productId' FROM resolution_cases WHERE id = 'r-5'") shouldBe
         Some("""p-"odd"\x""")
     }
