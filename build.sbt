@@ -45,11 +45,11 @@ lazy val pekkoHttpVersion = "1.2.0"
 // r2dbc 1.1.x) does not create a mixed-version classpath — Pekko forbids that.
 lazy val pekkoR2dbcVersion = "1.1.0"
 lazy val pekkoProjectionVersion = "1.1.0"
-// 0.41.4's bundled docker-java negotiates Docker API 1.32, which the runners'
-// daemon now rejects outright ("client version 1.32 is too old. Minimum
-// supported API version is 1.40"), aborting every container suite before it
-// starts. 0.43.0 ships a docker-java new enough to negotiate a supported
-// version. Not a code problem — the pin aged out from under us.
+// 0.43.0 resolves testcontainers-java 1.20.2 and docker-java 3.4.0. Bumping
+// this does NOT raise the negotiated Docker API version — docker-java still
+// defaults to UNKNOWN_VERSION, which testcontainers turns into 1.32 — so the
+// `api.version` system property set in the server test options is what keeps
+// the container suites running. Don't drop it on a later bump.
 lazy val testcontainersVersion = "0.43.0"
 lazy val circeVersion = "0.14.10"
 lazy val scalaTestVersion = "3.2.19"
@@ -147,6 +147,25 @@ lazy val server = (project in file("server"))
     // sharing safe needs a schema per suite, which is worth doing when suite time starts
     // to hurt and is not worth doing to fix a flake.
     Test / parallelExecution := false,
+
+    // Docker API version, or every container suite aborts before it starts with
+    //
+    //   client version 1.32 is too old. Minimum supported API version is 1.40
+    //
+    // Testcontainers falls back to a hard-coded 1.32 when docker-java's config reports
+    // UNKNOWN_VERSION (DockerClientProviderStrategy), and modern daemons refuse below 1.40.
+    // Naming a version suppresses that fallback. 1.43 is above the floor and supported by
+    // any daemon that enforces it.
+    //
+    // It must be the `api.version` SYSTEM PROPERTY: docker-java reads only DOCKER_HOST,
+    // DOCKER_TLS_VERIFY, DOCKER_CERT_PATH, DOCKER_CONFIG and DOCKER_CONTEXT from the
+    // environment, so a DOCKER_API_VERSION env var is silently ignored. Set via Tests.Setup
+    // rather than Test / javaOptions because these suites run unforked, which also means
+    // this covers local runs — no one has to export anything.
+    //
+    // Bumping testcontainersVersion does NOT remove the need for this: 0.43.0 still
+    // resolves docker-java 3.4.0, whose default is still UNKNOWN_VERSION -> 1.32.
+    Test / testOptions += Tests.Setup(() => System.setProperty("api.version", "1.43")),
 
     // BuildInfo exposes the dynver version to the running app (health endpoint).
     buildInfoKeys := Seq[BuildInfoKey](name, version, scalaVersion, sbtVersion),
