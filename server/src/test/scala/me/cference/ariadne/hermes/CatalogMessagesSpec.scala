@@ -19,6 +19,7 @@ final class CatalogMessagesSpec extends AnyWordSpec with Matchers {
 
   private val topics = CatalogMessages.Topics()
   private val at = Instant.parse("2026-09-07T12:00:00Z")
+  private val cid = CorrelationId("c-test")
 
   private def payloadOf(o: CatalogMessages.Outgoing): JsObject = o.payload.parseJson.asJsObject
 
@@ -32,7 +33,8 @@ final class CatalogMessagesSpec extends AnyWordSpec with Matchers {
       Confidence.Certain,
       sizeConfidence,
       at,
-      PriceSource.Scrape("flipp", 77L)
+      PriceSource.Scrape("flipp", 77L),
+      cid
     )
 
   private def priceMsg(scope: PriceScope, sc: Confidence = Confidence.Certain) =
@@ -92,7 +94,7 @@ final class CatalogMessagesSpec extends AnyWordSpec with Matchers {
         "price|p-1",
         2L,
         "",
-        PriceEvent.PriceObservationRetracted(at, "wrong")
+        PriceEvent.PriceObservationRetracted(at, "wrong", cid)
       ) shouldBe None
     }
 
@@ -112,7 +114,8 @@ final class CatalogMessagesSpec extends AnyWordSpec with Matchers {
         Some(Quantity.unsafe(BigDecimal(454), MeasureUnit.Gram)),
         Some(Gtin.unsafe("4006381333931")),
         Origin.Scrape("flipp", None),
-        ProductStatus.Provisional
+        ProductStatus.Provisional,
+        cid
       )
       val out = CatalogMessages.product(topics, "product|p-1", 1L, "", e).get
       out.topic shouldBe "product.registered"
@@ -129,7 +132,13 @@ final class CatalogMessagesSpec extends AnyWordSpec with Matchers {
       // §5: a consumer holding a product id learns to follow it. Whether this overloads
       // the topic is §10.1, open with the Lexicon and deliberately not decided here.
       val out = CatalogMessages
-        .product(topics, "product|p-old", 3L, "", ProductEvent.ProductMerged(ProductId("p-new")))
+        .product(
+          topics,
+          "product|p-old",
+          3L,
+          "",
+          ProductEvent.ProductMerged(ProductId("p-new"), cid)
+        )
         .get
       out.topic shouldBe "product.registered"
       val p = payloadOf(out)
@@ -146,14 +155,14 @@ final class CatalogMessagesSpec extends AnyWordSpec with Matchers {
         "product|p-1",
         2L,
         "",
-        ProductEvent.ProductAliasAdded("beurre")
+        ProductEvent.ProductAliasAdded("beurre", cid)
       ) shouldBe None
       CatalogMessages.product(
         topics,
         "product|p-1",
         3L,
         "",
-        ProductEvent.ProductIdentifierAdded(Gtin.unsafe("4006381333931"))
+        ProductEvent.ProductIdentifierAdded(Gtin.unsafe("4006381333931"), cid)
       ) shouldBe None
     }
   }
