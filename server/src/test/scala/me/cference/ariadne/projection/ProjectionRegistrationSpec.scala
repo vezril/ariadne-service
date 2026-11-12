@@ -1,5 +1,6 @@
 package me.cference.ariadne.projection
 
+import me.cference.ariadne.hermes.{CatalogMessages, CatalogPublisher}
 import org.apache.pekko.projection.Projection
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
@@ -35,21 +36,55 @@ final class ProjectionRegistrationSpec extends AnyWordSpec with Matchers {
 
   // `definitions` needs an ActorSystem to BUILD a projection, but not to be listed:
   // the behaviour is a lambda, so the names are readable without starting anything.
-  private val registered: List[String] =
+  private given scala.concurrent.ExecutionContext = scala.concurrent.ExecutionContext.parasitic
+
+  /** Nothing is published; the stub exists only so the Hermes projections are DEFINED. */
+  private val stubPublisher = new CatalogPublisher {
+    def publish(msg: CatalogMessages.Outgoing): scala.concurrent.Future[Unit] =
+      scala.concurrent.Future.unit
+  }
+
+  private def names(hermes: Boolean): List[String] =
     AriadneProjections
-      .definitions(null)(using null, scala.concurrent.ExecutionContext.parasitic)
+      .definitions(
+        null,
+        Option.when(hermes)(stubPublisher -> CatalogMessages.Topics())
+      )(using null, summon[scala.concurrent.ExecutionContext])
       .map(_.name)
+
+  private val registered: List[String] = names(hermes = true)
 
   "the projection registry" should {
 
     "start exactly the projections this service defines" in {
+      // `hermesProjection` is ONE generic method serving three projections, so the
+      // count is methods + 2. Stated as arithmetic rather than a magic number, since
+      // the point is that every method is represented, not that the number is 7.
       withClue(
         s"defined: $projectionMethods\nregistered: $registered\n" +
           "A projection defined but not listed in `definitions` never starts — it does not " +
           "fail, it silently does nothing, which is how the review queue shipped empty.\n"
       ) {
-        registered.size shouldBe projectionMethods.size
+        registered.size shouldBe (projectionMethods.size + 2)
       }
+    }
+
+    "not start a publisher when no broker is configured" in {
+      // Read models are what the service IS; publishing is what it tells other
+      // services. A service with no broker must still project, so the absence is a
+      // configuration outcome rather than a degraded one.
+      names(hermes = false).filter(_.startsWith("hermes-")) shouldBe empty
+      names(hermes = false) should contain("price-history")
+    }
+
+    "publish from a SEPARATE offset than the read models" in {
+      // The operational reason these are distinct projections at all: sharing an
+      // offset with a read model would make a Hermes outage stall the REST surface,
+      // so the catalogue would go stale because a broker was unreachable.
+      val readModels = Set("product-catalog", "store-coverage", "price-history", "review-queue")
+      val publishers = registered.filter(_.startsWith("hermes-")).toSet
+      publishers should have size 3
+      (publishers & readModels) shouldBe empty
     }
 
     "register the review queue — the one that was missing" in {
@@ -57,8 +92,12 @@ final class ProjectionRegistrationSpec extends AnyWordSpec with Matchers {
     }
 
     "register every read model the REST surface reads from" in {
-      registered should contain theSameElementsAs
-        List("product-catalog", "store-coverage", "price-history", "review-queue")
+      registered should contain allOf (
+        "product-catalog",
+        "store-coverage",
+        "price-history",
+        "review-queue"
+      )
     }
 
     "name each projection exactly once, or two daemons fight over one offset" in {
