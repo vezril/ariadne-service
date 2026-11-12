@@ -600,8 +600,39 @@ manual purchase entry, manual price entry.
 that REST was wanted, and the two could not both be right. The rule that decides it: a Next.js BFF
 is server-side but is still a BFF, and the blocked-and-waiting argument in §9 is about **latency
 shape, not protocol** — REST over the same read models satisfies it. gRPC stays the surface for
-Demeter and demeter-insight, and its first build (step 5, still unbuilt) can now wait for the
-Lexicon contract to settle rather than being shaped by whoever needed it first.
+Demeter and demeter-insight, and its first build (step 5) could then wait for the Lexicon contract
+to settle rather than being shaped by whoever needed it first.
+
+**BUILT 2026-11-12, against a LOCAL stub.** `server/src/main/protobuf/ariadne/v1/ariadne.proto` is
+the working proposal, not the landed contract — the Lexicon still owns that, and the package is
+`ariadne.v1` rather than `codex.catalog` specifically so this does not squat the contested name
+(see `docs/lexicon-note.md`: the Lexicon's reserved `catalog` is Artemis's media catalog under the
+name "Ariadne", a different service from this one). When the contract settles, these stubs are
+replaced by generated ones from there.
+
+**Disabled by default** (`ariadne.grpc.enabled = false`), on its own port, which is a decision
+rather than caution — the same call the scrape scheduler makes. Enabling it opens a second
+listening socket carrying a write surface with no authentication of its own; it assumes the
+cluster network is the boundary, and that should be an explicit act in the environment that means
+to do it.
+
+**Three RPCs from the shape above are DEFERRED, and the reason is a missing read model rather than
+a missing opinion:**
+
+| RPC | Why not yet |
+|---|---|
+| `ListProducts` | No paged/filtered product query on the read model |
+| `ListPurchases` | No projection writes the `purchases`/`purchase_lines` tables — see below |
+| — | `GetCurrentPrice` carries `size_confidence` but NOT `price_confidence`: `current_price` does not store it (only `price_history` does), and a defaulted `0.0` would read as "no confidence" rather than "not known". The proto reserves the field number for a projection that has it. |
+
+**Found while building this: `price_history` was write-only.** The projection appended to it and
+nothing ever selected from it, so the table demeter-insight is supposed to re-point at during the
+Demeter migration had no read path at all. `GetPriceHistory` is that read path.
+
+**Also found: the DDL declares `purchases` and `purchase_lines`, and nothing writes them.** §3
+gives the Purchase aggregate an offset-only projection and no read model, so the schema and §3
+disagree. Worth settling deliberately — either the tables go, or a projection fills them and
+`ListPurchases` follows.
 
 The consequence to keep in view: this surface now has **two consumers**, so the OpenAPI document is
 a published contract rather than an affordance Ariadne can change freely. That is what the drift
@@ -1083,7 +1114,9 @@ candidate lists prove insufficient against real receipts, not before.
 3. `core`: normalizer + scorer (§6.3) + property tests — the hard part, do it early.
 4. `server`: persistence entities + product-catalog/price-history/current-price/**store-coverage**
    projections (the last one backs §2.3.1's read-time fan-out).
-5. gRPC surface (stub the Lexicon contract locally while the proposal is reviewed).
+5. gRPC surface (stub the Lexicon contract locally while the proposal is reviewed). **DONE
+   2026-11-12** — seven of the nine proposed RPCs, disabled by default, against a local stub proto.
+   See §4 for the three deferments and the two read-model gaps it surfaced.
 6. Hermes publisher projection + topic self-provisioning (client pinned @v1.13.0).
 7. ResolutionCase + review queue + REST + `/docs` + Insomnia.
 8. Scraper adapter (Flipp first — port Demeter's ingestion incl. the fetch ledger, rate

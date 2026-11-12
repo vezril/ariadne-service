@@ -252,9 +252,72 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
    * Resolving here rather than materialising per-store rows means a newly registered franchise is
    * priced correctly the moment it exists, with no backfill and nothing to go stale.
    */
+  /**
+   * Price history for a product, newest first, for the gRPC `GetPriceHistory` (§4).
+   *
+   * `price_history` was write-only until this: the projection appended to it and nothing ever
+   * selected from it, so the table demeter-insight is supposed to re-point at during the Demeter
+   * migration had no read path at all.
+   *
+   * When `storeId` is given, the rows are the ones COVERING that store — its own exact rows plus
+   * the area rows for its chain+region (§2.3.1), which is the same join `currentPriceForStore`
+   * does. Without it, every scope for the product is returned, and each row states its own scope so
+   * a caller can tell a receipt from a flyer claim rather than having to assume.
+   *
+   * Ordered newest-first with a bounded limit because the natural caller is a price chart, and an
+   * unbounded history over a long-lived product is the one response here with no ceiling.
+   */
+  def priceHistory(
+      productId: String,
+      storeId: Option[String],
+      from: Option[Instant],
+      to: Option[Instant],
+      limit: Int
+  ): Future[List[PriceHistoryRow]] =
+    query(
+      """SELECT ph.product_id, ph.scope_kind, ph.store_id, ph.chain_id, ph.area, ph.observed_at,
+                ph.price_amount, ph.price_currency, ph.unit_price, ph.unit_per_amount,
+                ph.unit_per_unit, ph.promo, ph.price_confidence, ph.size_confidence, ph.source,
+                ph.raw_response_id, ph.correlation_id, ph.persistence_id, ph.seq_nr
+         FROM price_history ph
+         LEFT JOIN store_coverage sc ON sc.store_id = $2
+         WHERE ph.product_id = $1
+           AND ($2::text IS NULL OR (
+                 (ph.scope_kind = 'exact' AND ph.store_id = $2)
+                 OR (ph.scope_kind = 'area' AND ph.chain_id = sc.chain_id AND ph.area = sc.area)
+               ))
+           AND ($3::timestamptz IS NULL OR ph.observed_at >= $3)
+           AND ($4::timestamptz IS NULL OR ph.observed_at <= $4)
+         ORDER BY ph.observed_at DESC
+         LIMIT $5""",
+      r =>
+        PriceHistoryRow(
+          productId = r.get(0, classOf[String]),
+          scopeKind = r.get(1, classOf[String]),
+          storeId = Option(r.get(2, classOf[String])),
+          chainId = Option(r.get(3, classOf[String])),
+          area = Option(r.get(4, classOf[String])),
+          observedAt = r.get(5, classOf[Instant]),
+          priceAmount = BigDecimal(r.get(6, classOf[java.math.BigDecimal])),
+          priceCurrency = r.get(7, classOf[String]),
+          unitPrice = Option(r.get(8, classOf[java.math.BigDecimal])).map(BigDecimal(_)),
+          unitPerAmount = Option(r.get(9, classOf[java.math.BigDecimal])).map(BigDecimal(_)),
+          unitPerUnit = Option(r.get(10, classOf[String])),
+          promo = Option(r.get(11, classOf[String])),
+          priceConfidence = r.get(12, classOf[java.lang.Double]).doubleValue,
+          sizeConfidence = r.get(13, classOf[java.lang.Double]).doubleValue,
+          source = r.get(14, classOf[String]),
+          rawResponseId = Option(r.get(15, classOf[java.lang.Long])).map(_.longValue),
+          correlationId = Option(r.get(16, classOf[String])),
+          persistenceId = r.get(17, classOf[String]),
+          seqNr = r.get(18, classOf[java.lang.Long]).longValue
+        )
+    )(productId, storeId.orNull, from.orNull, to.orNull, java.lang.Integer.valueOf(limit))
+
   def currentPriceForStore(productId: String, storeId: String): Future[Option[ResolvedPrice]] =
     query(
-      """SELECT cp.price_amount, cp.price_currency, cp.observed_at, cp.source, cp.scope_kind
+      """SELECT cp.price_amount, cp.price_currency, cp.observed_at, cp.source, cp.scope_kind,
+                cp.size_confidence, cp.store_id, cp.chain_id, cp.area
          FROM current_price cp
          LEFT JOIN store_coverage sc ON sc.store_id = $2
          WHERE cp.product_id = $1
@@ -270,7 +333,11 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
           r.get(1, classOf[String]),
           r.get(2, classOf[Instant]),
           r.get(3, classOf[String]),
-          r.get(4, classOf[String])
+          r.get(4, classOf[String]),
+          r.get(5, classOf[java.lang.Double]).doubleValue,
+          Option(r.get(6, classOf[String])),
+          Option(r.get(7, classOf[String])),
+          Option(r.get(8, classOf[String]))
         )
     )(productId, storeId).map(_.headOption)
 
@@ -663,7 +730,19 @@ object ReadModelRepository {
       currency: String,
       observedAt: Instant,
       source: String,
-      scopeKind: String
+      scopeKind: String,
+      /**
+       * Contract-required (§2.3): Demeter's match confidence is the weakest link of its own split
+       * confidence and this one, so a caller that never receives it reads too high.
+       *
+       * Note what is NOT here: `price_confidence`. The `current_price` table does not carry it —
+       * only `price_history` does. Rather than send a default that would read as "no confidence",
+       * GetCurrentPrice omits it and the proto says so; GetPriceHistory carries both.
+       */
+      sizeConfidence: Double,
+      storeId: Option[String],
+      chainId: Option[String],
+      area: Option[String]
   ) {
     def isExact: Boolean = scopeKind == "exact"
   }

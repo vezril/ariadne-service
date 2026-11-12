@@ -13,6 +13,20 @@ import scala.jdk.CollectionConverters.*
 final case class HttpConfig(host: String, port: Int)
 
 /**
+ * Typed view over `ariadne.grpc` — the synchronous service-to-service surface (§4).
+ *
+ * `enabled` defaults to FALSE, and that is a decision rather than caution, the same call the scrape
+ * scheduler makes. Enabling it opens a second listening socket carrying a write surface
+ * (RegisterProduct, RecordPurchase) with no authentication of its own — it assumes the cluster
+ * network is the boundary. That should be an explicit act in the environment that means to do it,
+ * not something a default turns on everywhere the image runs.
+ *
+ * Bound on its own port because gRPC needs HTTP/2 end to end: sharing the REST port would put an
+ * h2c upgrade in front of the browser surface for no benefit.
+ */
+final case class GrpcConfig(enabled: Boolean, host: String, port: Int)
+
+/**
  * Typed view over `ariadne.scrape`.
  *
  * `sources` is parsed EAGERLY at boot, including when scraping is disabled, so a malformed postal
@@ -26,15 +40,26 @@ final case class ScrapeConfig(
     sources: List[ScrapeSource]
 )
 
-final case class AppConfig(http: HttpConfig, scrape: ScrapeConfig, hermes: HermesConfig)
+final case class AppConfig(
+    http: HttpConfig,
+    grpc: GrpcConfig,
+    scrape: ScrapeConfig,
+    hermes: HermesConfig
+)
 
 object AppConfig:
 
   /** Read + type the operational config. Fails fast (Typesafe Config throws) on a missing key. */
   def load(raw: Config): AppConfig =
     val http = raw.getConfig("ariadne.http")
+    val grpc = raw.getConfig("ariadne.grpc")
     AppConfig(
       HttpConfig(http.getString("host"), http.getInt("port")),
+      GrpcConfig(
+        enabled = grpc.getBoolean("enabled"),
+        host = grpc.getString("host"),
+        port = grpc.getInt("port")
+      ),
       scrape(raw.getConfig("ariadne.scrape")),
       HermesConfig.load(raw.getConfig("ariadne.hermes"))
     )

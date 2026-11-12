@@ -1,0 +1,285 @@
+syntax = "proto3";
+
+package ariadne.v1;
+
+// Ariadne's synchronous read surface (DESIGN §4).
+//
+// A PROPOSAL, held locally. Build order step 5 says to "stub the Lexicon contract locally while
+// the proposal is reviewed", and §4 says the shape is to be proposed to the Lexicon session and
+// NOT landed unilaterally. So this file is the working stub Ariadne serves; the Lexicon owns the
+// contract, and when it settles this is replaced by generated stubs from there.
+//
+// There is a naming question open before any of this can land: the Lexicon reserves `catalog` for
+// Artemis's media catalog under the name "Ariadne" (a planned analytics consumer), which is a
+// different service from this one — see docs/lexicon-note.md. The package here is `ariadne.v1`
+// rather than `codex.catalog` precisely so this stub does not squat the contested name.
+//
+// WHAT GOES HERE AND WHAT DOES NOT (the §9 rule): blocked-and-waiting is gRPC; reaction is Hermes.
+// The canonical awaiting caller is Demeter/demeter-insight needing identity and price NOW. The
+// browser surface is REST (ruled 2026-09-05) and is a thin mirror of these same queries, not a
+// second behaviour.
+//
+// Reads hit PROJECTIONS only, never entities — CQRS held strictly. The two writes go through the
+// entity `decide`, which is why they are the only RPCs that can answer a domain refusal.
+service AriadneCatalog {
+  // --- Identity -------------------------------------------------------------
+  rpc GetProduct (GetProductRequest) returns (GetProductResponse);
+  rpc SearchProducts (SearchProductsRequest) returns (SearchProductsResponse);
+  rpc ResolveProduct (ResolveProductRequest) returns (ResolveProductResponse);
+
+  // --- Prices ---------------------------------------------------------------
+  rpc GetCurrentPrice (GetCurrentPriceRequest) returns (GetCurrentPriceResponse);
+  rpc GetPriceHistory (GetPriceHistoryRequest) returns (stream PricePoint);
+
+  // --- Writes a caller awaits (thin command surface) ------------------------
+  rpc RegisterProduct (RegisterProductRequest) returns (RegisterProductResponse);
+  rpc RecordPurchase (RecordPurchaseRequest) returns (RecordPurchaseResponse);
+
+  // DEFERRED, deliberately, so their absence is a stated gap rather than an oversight:
+  //
+  //   rpc ListProducts  — needs a paged/filtered product query the read model does not have.
+  //   rpc ListPurchases — needs a `purchases` read model, which §3 does not give this aggregate
+  //                       at all (it has an offset-only projection). Adding one is a design
+  //                       change, not an implementation gap, because nothing in the catalog
+  //                       queries purchases — budgeting will, over Hermes, as its own service.
+}
+
+// Money is a DECIMAL STRING everywhere, never a float or a double. `4.99` has no exact binary
+// representation, and a consumer comparing prices for a deal would be comparing rounding
+// artefacts. Same rule as the Hermes payloads.
+message Money {
+  string amount = 1; // decimal string, e.g. "4.99"
+  string currency = 2; // ISO 4217, e.g. "CAD"
+}
+
+// A price fact's scope is a TAGGED UNION and never a bare store id (§2.3.1).
+//
+// A flyer feed cannot name an individual franchise — merchant plus queried postal code is the
+// finest grain it offers — so a scraped price is an `area` fact, while a receipt is `exact`.
+// Reading an area price as one store's price under-counts coverage; expanding it to N member
+// stores fabricates N facts. Deal alerting is wrong in both directions without the tag, and wrong
+// QUIETLY, which is why the tag is required rather than optional.
+message PriceScope {
+  oneof scope {
+    ExactScope exact = 1;
+    AreaScope area = 2;
+  }
+}
+
+message ExactScope {
+  string store_id = 1;
+}
+
+message AreaScope {
+  string chain_id = 1;
+  string area = 2; // postal prefix, e.g. "H2X"
+}
+
+enum ProductStatus {
+  PRODUCT_STATUS_UNSPECIFIED = 0;
+  PROVISIONAL = 1; // auto-created by resolution; awaiting review
+  ACTIVE = 2;
+  MERGED_INTO = 3; // a forwarding tombstone; see Product.merged_into
+  DEPRECATED = 4;
+}
+
+message Quantity {
+  string amount = 1; // decimal string
+  string unit = 2;
+}
+
+message Product {
+  string product_id = 1;
+  string name = 2;
+  string brand = 3;
+  string category = 4;
+  Quantity size = 5;
+  // Field 6 was `repeated string gtins`. Withheld for now: the product read model does not carry
+  // them, and an empty repeated field reads as "this product has no barcodes" rather than "not
+  // known" — the same failure as a defaulted confidence. Reserved so the number stays free for a
+  // projection that actually has them.
+  reserved 6;
+  ProductStatus status = 7;
+  // Set only when status is MERGED_INTO. The loser's id keeps resolving forever, because
+  // Dionysus and Demeter hold ids Ariadne does not control.
+  string merged_into = 8;
+}
+
+// --- Identity ---------------------------------------------------------------
+
+message GetProductRequest {
+  string product_id = 1;
+  string correlation_id = 2;
+  // Follow a merge tombstone to the canonical product. Default false, so a caller is never
+  // silently handed a different id than it asked for.
+  bool follow_merges = 3;
+}
+
+message GetProductResponse {
+  Product product = 1;
+  string correlation_id = 2;
+  // True when `follow_merges` sent us somewhere else. The response SAYS so (§4) rather than
+  // leaving a caller to notice the id changed under it.
+  bool redirected = 3;
+  string requested_product_id = 4;
+}
+
+message SearchProductsRequest {
+  string query = 1;
+  int32 limit = 2; // defaults to 20; clamped
+  string correlation_id = 3;
+}
+
+message SearchProductsResponse {
+  repeated Product products = 1;
+  string correlation_id = 2;
+}
+
+// The resolver (§6, hot spot #1) — the service's reason to exist.
+message ResolveProductRequest {
+  string name = 1;
+  string brand = 2;
+  string gtin = 3; // strong key; wins outright when present and known
+  string store_id = 4;
+  string external_id = 5;
+  string correlation_id = 6;
+}
+
+message ResolveProductResponse {
+  oneof outcome {
+    Matched matched = 1;
+    Ambiguous ambiguous = 2;
+    NoMatch no_match = 3;
+  }
+  string correlation_id = 4;
+}
+
+message Matched {
+  string product_id = 1;
+  double confidence = 2;
+  string how = 3; // gtin | listing | fuzzy
+}
+
+// Resolution NEVER picks for the caller. Several correct candidates and none unique is the
+// ordinary case, not the edge one; auto-picking would attribute a listing to a product on no
+// evidence. An ambiguous outcome parks a review case, whose id is returned so a caller can
+// follow it.
+message Ambiguous {
+  repeated Candidate candidates = 1;
+  string resolution_case_id = 2;
+}
+
+message Candidate {
+  string product_id = 1;
+  double score = 2;
+  repeated string notes = 3;
+}
+
+message NoMatch {
+  string resolution_case_id = 1;
+}
+
+// --- Prices -----------------------------------------------------------------
+
+message GetCurrentPriceRequest {
+  string product_id = 1;
+  // Required. A price with no store is not a fact this service holds: §2.3.1 makes scope part of
+  // a price's identity, so "the current price" with no store named has no answer that is not a
+  // guess across incomparable scopes.
+  string store_id = 2;
+  string correlation_id = 3;
+}
+
+message GetCurrentPriceResponse {
+  bool found = 1;
+  Money price = 2;
+  PriceScope scope = 3; // exact-over-area (§2.3.1): says which it gave you
+  string observed_at = 4; // ISO-8601
+  string source = 5; // scrape | purchase | manual | backfill
+  // CONTRACT-REQUIRED (§2.3). Demeter computes matchConfidence as the weakest link of its own
+  // split confidence and this one, so omitting it would let downstream judgment read too high.
+  double size_confidence = 6;
+  string correlation_id = 7;
+  // NOTE: there is deliberately no `price_confidence` here, and the gap is real rather than an
+  // oversight. The `current_price` read model does not carry it — only `price_history` does — and
+  // a proto3 double defaults to 0.0, which a consumer would read as "no confidence at all"
+  // instead of "not known". GetPriceHistory carries both. If a caller needs price confidence on
+  // the current price, the fix is a column on the projection, not a default here.
+  // Field 8 is left free for exactly that.
+  reserved 8;
+}
+
+message GetPriceHistoryRequest {
+  string product_id = 1;
+  string store_id = 2; // optional; empty means every scope covering the product
+  string from = 3; // ISO-8601, optional
+  string to = 4; // ISO-8601, optional
+  int32 limit = 5; // defaults to 500; clamped
+  string correlation_id = 6;
+}
+
+// Server-streamed, because a long history is the one response here that is unbounded in
+// principle. Carries scope and both confidences per point (§2.3.1, §2.3).
+message PricePoint {
+  Money price = 1;
+  PriceScope scope = 2;
+  string observed_at = 3;
+  string source = 4;
+  double price_confidence = 5;
+  double size_confidence = 6;
+  Money unit_price = 7; // may be absent
+  bool promo = 8;
+}
+
+// --- Writes -----------------------------------------------------------------
+
+message RegisterProductRequest {
+  string product_id = 1; // optional; derived when absent
+  string name = 2;
+  string brand = 3;
+  string category = 4;
+  Quantity size = 5;
+  string gtin = 6;
+  string correlation_id = 7;
+}
+
+message RegisterProductResponse {
+  string product_id = 1;
+  bool accepted = 2;
+  // A domain refusal is a legitimate answer rather than an error: these two RPCs go through
+  // `decide`, so "already registered" is information the caller asked for.
+  string refusal = 3;
+  string correlation_id = 4;
+}
+
+message PurchaseLine {
+  string product_id = 1;
+  string quantity = 2; // decimal string
+  Money price_paid = 3;
+  Money line_total = 4;
+}
+
+message RecordPurchaseRequest {
+  // REQUIRED and caller-minted (§7.1), unlike every other write here. Ariadne being unreachable
+  // must not block someone recording a receipt — a dropped receipt is lost user data that, unlike
+  // a price, can never be reconstructed — so the caller buffers locally and drains an outbox, and
+  // a caller-minted id is what makes that retry addressable at all.
+  string purchase_id = 1;
+  string store_id = 2;
+  string purchased_at = 3; // ISO-8601
+  repeated PurchaseLine lines = 4;
+  Money total = 5;
+  string source = 6; // manual | receipt
+  string receipt_blob_id = 7; // required when source is receipt
+  string correlation_id = 8;
+}
+
+message RecordPurchaseResponse {
+  string purchase_id = 1;
+  // True for an identical re-record, which is a no-op SUCCESS (§7.1): an error would be
+  // indistinguishable from a genuine failure and the caller's outbox could never drain. A
+  // DIFFERENT purchase under a taken id is refused instead.
+  bool accepted = 2;
+  string refusal = 3;
+  string correlation_id = 4;
+}

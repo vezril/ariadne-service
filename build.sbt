@@ -101,10 +101,16 @@ lazy val core = (project in file("core"))
 // --- server: Pekko runtime + Main + Docker image. ----------------------------
 lazy val server = (project in file("server"))
   .dependsOn(core)
-  .enablePlugins(JavaAppPackaging, DockerPlugin, BuildInfoPlugin)
+  // PekkoGrpcPlugin generates ONLY ariadne/v1/ariadne.proto, this service's own surface
+  // (DESIGN §4). The Hermes stubs arrive pre-generated in a published jar and run no codegen
+  // here — see lexiconVersion above.
+  .enablePlugins(JavaAppPackaging, DockerPlugin, BuildInfoPlugin, PekkoGrpcPlugin)
   .settings(
     name := "ariadne-server",
     Compile / mainClass := Some("me.cference.ariadne.Main"),
+    // Server only. Ariadne SERVES this surface and never calls itself, so a generated client
+    // would be dead code that still has to compile and drag down coverage.
+    pekkoGrpcGeneratedSources := Seq(PekkoGrpc.Server),
     resolvers ++= lexiconToken
       .map(_ => "Lexicon GitHub Packages".at("https://maven.pkg.github.com/vezril/the-lexicon"))
       .toSeq,
