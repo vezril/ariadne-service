@@ -45,12 +45,37 @@ lazy val pekkoHttpVersion = "1.2.0"
 // r2dbc 1.1.x) does not create a mixed-version classpath — Pekko forbids that.
 lazy val pekkoR2dbcVersion = "1.1.0"
 lazy val pekkoProjectionVersion = "1.1.0"
-lazy val testcontainersVersion = "0.41.4"
+// 0.43.0 resolves testcontainers-java 1.20.2 and docker-java 3.4.0. Bumping
+// this does NOT raise the negotiated Docker API version — docker-java still
+// defaults to UNKNOWN_VERSION, which testcontainers turns into 1.32 — so the
+// `api.version` system property set in the server test options is what keeps
+// the container suites running. Don't drop it on a later bump.
+lazy val testcontainersVersion = "0.43.0"
 lazy val circeVersion = "0.14.10"
 lazy val scalaTestVersion = "3.2.19"
 lazy val scalaCheckPlusVersion = "3.2.19.0"
 lazy val logbackVersion = "1.5.16"
 lazy val logstashEncoderVersion = "8.0"
+
+// The shared HermesMQ contract, as PUBLISHED JARS — no protobuf codegen runs here.
+//
+// DESIGN §5 said "the pinned hermesmq-client @v1.13.0". That artifact/version does not
+// exist: hermesmq's tags stop at v1.9.1 and its client is published only as a dynver
+// snapshot. The fleet's working path is the Lexicon's gRPC stubs — artemis-service has
+// run them in production since v1.2.x — so Ariadne follows the precedent that exists
+// rather than the pin that does not. §5 is corrected to match.
+lazy val lexiconVersion =
+  "0.8.0" // +correlation_id envelope field (request-tracing), which §8 needs
+
+// read:packages token for the-lexicon GitHub Packages resolver: LEXICON_TOKEN (the CI
+// secret, mirroring apollo-storage and artemis) preferred, else GITHUB_TOKEN (authorized
+// dev). None => the pinned version resolves from ~/.ivy2/local after `sbt publishLocal`
+// in the-lexicon, the documented local fallback. No credentials are committed.
+lazy val lexiconToken: Option[String] =
+  sys.env
+    .get("LEXICON_TOKEN")
+    .filter(_.nonEmpty)
+    .orElse(sys.env.get("GITHUB_TOKEN").filter(_.nonEmpty))
 
 // --- root: aggregate only, not published -------------------------------------
 lazy val root = (project in file("."))
@@ -80,7 +105,20 @@ lazy val server = (project in file("server"))
   .settings(
     name := "ariadne-server",
     Compile / mainClass := Some("me.cference.ariadne.Main"),
+    resolvers ++= lexiconToken
+      .map(_ => "Lexicon GitHub Packages".at("https://maven.pkg.github.com/vezril/the-lexicon"))
+      .toSeq,
+    credentials ++= lexiconToken
+      .map(token => Credentials("GitHub Package Registry", "maven.pkg.github.com", "vezril", token))
+      .toSeq,
     libraryDependencies ++= Seq(
+      // The HermesMQ gRPC stubs (pre-generated in the published jar) + the runtime that
+      // drives them. Ariadne only PUBLISHES, but the stubs come as one contract.
+      "io.codex" %% "lexicon-hermes-grpc" % lexiconVersion,
+      // pekko-grpc-runtime arrives transitively with the stubs. It pulls pekko-discovery
+      // at its own line, so discovery is pinned to ours below — Pekko refuses a mixed
+      // classpath outright, which is the good failure, but only if the pin is there.
+      "org.apache.pekko" %% "pekko-discovery" % pekkoVersion,
       // circe, for the ported Flipp decoders ONLY.
       //
       // The service marshals its REST surface with spray-json, so this is a second JSON
@@ -142,6 +180,25 @@ lazy val server = (project in file("server"))
     // sharing safe needs a schema per suite, which is worth doing when suite time starts
     // to hurt and is not worth doing to fix a flake.
     Test / parallelExecution := false,
+
+    // Docker API version, or every container suite aborts before it starts with
+    //
+    //   client version 1.32 is too old. Minimum supported API version is 1.40
+    //
+    // Testcontainers falls back to a hard-coded 1.32 when docker-java's config reports
+    // UNKNOWN_VERSION (DockerClientProviderStrategy), and modern daemons refuse below 1.40.
+    // Naming a version suppresses that fallback. 1.43 is above the floor and supported by
+    // any daemon that enforces it.
+    //
+    // It must be the `api.version` SYSTEM PROPERTY: docker-java reads only DOCKER_HOST,
+    // DOCKER_TLS_VERIFY, DOCKER_CERT_PATH, DOCKER_CONFIG and DOCKER_CONTEXT from the
+    // environment, so a DOCKER_API_VERSION env var is silently ignored. Set via Tests.Setup
+    // rather than Test / javaOptions because these suites run unforked, which also means
+    // this covers local runs — no one has to export anything.
+    //
+    // Bumping testcontainersVersion does NOT remove the need for this: 0.43.0 still
+    // resolves docker-java 3.4.0, whose default is still UNKNOWN_VERSION -> 1.32.
+    Test / testOptions += Tests.Setup(() => System.setProperty("api.version", "1.43")),
 
     // BuildInfo exposes the dynver version to the running app (health endpoint).
     buildInfoKeys := Seq[BuildInfoKey](name, version, scalaVersion, sbtVersion),

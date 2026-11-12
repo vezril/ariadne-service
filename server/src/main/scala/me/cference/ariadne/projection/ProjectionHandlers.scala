@@ -90,7 +90,7 @@ object ProjectionHandlers {
         // A delta, so a partial update — an upsert here would blank the fields the
         // command did not mention.
         repo.updateStoreDetails(id, e.name, e.area.map(_.postalPrefix), e.label)
-      case StoreEvent.StoreDeactivated =>
+      case _: StoreEvent.StoreDeactivated =>
         repo.deactivateStore(id)
     }
   }

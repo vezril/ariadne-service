@@ -54,7 +54,8 @@ final class PriceObservationSpec extends AnyFunSuite with Matchers {
           Confidence.Certain,
           Confidence.Certain,
           at,
-          source
+          source,
+          cid
         )
       )
     )
@@ -168,7 +169,8 @@ final class PriceObservationSpec extends AnyFunSuite with Matchers {
           Confidence.Certain,
           Confidence.Certain,
           recent,
-          scrape
+          scrape,
+          cid
         ),
         PriceEvent.PriceObserved(
           pid,
@@ -179,7 +181,8 @@ final class PriceObservationSpec extends AnyFunSuite with Matchers {
           Confidence.Certain,
           Confidence.Certain,
           old,
-          PriceSource.Backfill("demeter")
+          PriceSource.Backfill("demeter"),
+          cid
         )
       )
     )

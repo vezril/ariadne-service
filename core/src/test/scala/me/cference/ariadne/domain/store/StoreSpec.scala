@@ -12,7 +12,9 @@ final class StoreSpec extends AnyFunSuite with Matchers {
   private val area = Area("H2X")
 
   private def registered: StoreState =
-    Store.replay(List(StoreEvent.StoreRegistered(sid, "IGA Plateau", chain, area, Some("Plateau"))))
+    Store.replay(
+      List(StoreEvent.StoreRegistered(sid, "IGA Plateau", chain, area, Some("Plateau"), cid))
+    )
 
   test("registers with a trimmed name and refuses a blank one") {
     Store
@@ -43,7 +45,7 @@ final class StoreSpec extends AnyFunSuite with Matchers {
   }
 
   test("deactivating is idempotent") {
-    val deactivated = Store.evolve(registered, StoreEvent.StoreDeactivated)
+    val deactivated = Store.evolve(registered, StoreEvent.StoreDeactivated(cid))
     Store.decide(deactivated, StoreCommand.DeactivateStore(cid)) shouldBe Right(Nil)
   }
 }

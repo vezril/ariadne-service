@@ -45,7 +45,17 @@ object StoreCommand {
   final case class DeactivateStore(correlationId: CorrelationId) extends StoreCommand
 }
 
-sealed trait StoreEvent extends CborSerializable
+/**
+ * Every event carries the correlation id of the command that caused it (§8).
+ *
+ * On the EVENT, not only the command, because the journal outlives the request: the Hermes
+ * publisher reads committed events long after the caller has gone, and a trace that stops at the
+ * write boundary cannot follow a scrape through resolution into a deal alert. Pekko 1.2.0 exposes
+ * no user event-metadata API, so this is a field.
+ */
+sealed trait StoreEvent extends CborSerializable {
+  def correlationId: CorrelationId
+}
 
 object StoreEvent {
   final case class StoreRegistered(
@@ -53,14 +63,19 @@ object StoreEvent {
       name: String,
       chain: ChainId,
       area: Area,
-      label: Option[String]
+      label: Option[String],
+      correlationId: CorrelationId
   ) extends StoreEvent
   final case class StoreDetailsUpdated(
       name: Option[String],
       area: Option[Area],
-      label: Option[String]
+      label: Option[String],
+      correlationId: CorrelationId
   ) extends StoreEvent
-  case object StoreDeactivated extends StoreEvent
+  // A case CLASS, where it used to be an object: a parameterless event cannot carry the
+  // correlation that caused it, and "every event except this one" is the kind of
+  // exception that quietly becomes a gap in a trace.
+  final case class StoreDeactivated(correlationId: CorrelationId) extends StoreEvent
 }
 
 object Store {
@@ -69,7 +84,19 @@ object Store {
     (state, cmd) match {
       case (StoreState.Empty, c: StoreCommand.RegisterStore) =>
         if c.name.isBlank then Left(DomainError.EmptyStoreName)
-        else Right(List(StoreEvent.StoreRegistered(c.id, c.name.trim, c.chain, c.area, c.label)))
+        else
+          Right(
+            List(
+              StoreEvent.StoreRegistered(
+                c.id,
+                c.name.trim,
+                c.chain,
+                c.area,
+                c.label,
+                c.correlationId
+              )
+            )
+          )
 
       case (StoreState.Empty, _) => Left(DomainError.NotRegistered)
       case (_: StoreState.Existing, _: StoreCommand.RegisterStore) =>
@@ -87,12 +114,17 @@ object Store {
               c.area.exists(_ != s.area) ||
               (c.label.isDefined && c.label != s.label)
           if changed then
-            Right(List(StoreEvent.StoreDetailsUpdated(c.name.map(_.trim), c.area, c.label)))
+            Right(
+              List(
+                StoreEvent.StoreDetailsUpdated(c.name.map(_.trim), c.area, c.label, c.correlationId)
+              )
+            )
           else Right(Nil)
         }
 
-      case (s: StoreState.Existing, _: StoreCommand.DeactivateStore) =>
-        if !s.active then Right(Nil) else Right(List(StoreEvent.StoreDeactivated))
+      case (s: StoreState.Existing, c: StoreCommand.DeactivateStore) =>
+        if !s.active then Right(Nil)
+        else Right(List(StoreEvent.StoreDeactivated(c.correlationId)))
     }
 
   def evolve(state: StoreState, event: StoreEvent): StoreState =
@@ -109,7 +141,7 @@ object Store {
               area = e.area.getOrElse(s.area),
               label = e.label.orElse(s.label)
             )
-          case StoreEvent.StoreDeactivated => s.copy(active = false)
+          case _: StoreEvent.StoreDeactivated => s.copy(active = false)
         }
     }
 

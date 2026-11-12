@@ -14,9 +14,16 @@ concurrency:
 # gh release create needs write; nothing else does.
 permissions:
   contents: write
+  packages: read
 
 env:
   IMAGE_NAME: ariadne
+  # Resolving io.codex:lexicon-* from the-lexicon's GitHub Packages needs auth even though
+  # the package is public; without it the test and image-build steps both die at `update`.
+  # The built-in GITHUB_TOKEN is sufficient (verified in CI), so no secret is required.
+  # LEXICON_TOKEN, a read:packages PAT, still wins when present — see ci.yml.
+  LEXICON_TOKEN: ${{ secrets.LEXICON_TOKEN }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   release:

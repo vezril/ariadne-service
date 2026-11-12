@@ -51,7 +51,10 @@ object PurchaseCommand {
       extends PurchaseCommand
 }
 
-sealed trait PurchaseEvent extends CborSerializable
+/** Every event carries the correlation id of the command that caused it (§8). */
+sealed trait PurchaseEvent extends CborSerializable {
+  def correlationId: CorrelationId
+}
 
 object PurchaseEvent {
   final case class PurchaseRecorded(
@@ -60,9 +63,11 @@ object PurchaseEvent {
       purchasedAt: Instant,
       lines: List[PurchaseLine],
       total: Money,
-      source: PurchaseSource
+      source: PurchaseSource,
+      correlationId: CorrelationId
   ) extends PurchaseEvent
-  final case class PurchaseVoided(reason: String) extends PurchaseEvent
+  final case class PurchaseVoided(reason: String, correlationId: CorrelationId)
+      extends PurchaseEvent
 }
 
 /**
@@ -95,7 +100,15 @@ object Purchase {
               Right(
                 List(
                   PurchaseEvent
-                    .PurchaseRecorded(c.id, c.storeId, c.purchasedAt, c.lines, c.total, c.source)
+                    .PurchaseRecorded(
+                      c.id,
+                      c.storeId,
+                      c.purchasedAt,
+                      c.lines,
+                      c.total,
+                      c.source,
+                      c.correlationId
+                    )
                 )
               )
           }
@@ -120,7 +133,7 @@ object Purchase {
 
       case (s: PurchaseState.Recorded, c: PurchaseCommand.VoidPurchase) =>
         if s.voided then Left(DomainError.AlreadyVoided)
-        else Right(List(PurchaseEvent.PurchaseVoided(c.reason)))
+        else Right(List(PurchaseEvent.PurchaseVoided(c.reason, c.correlationId)))
     }
 
   /** Content equality, so a retry is recognised without trusting the caller to say so. */

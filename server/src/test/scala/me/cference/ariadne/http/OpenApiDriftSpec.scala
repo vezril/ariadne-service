@@ -75,7 +75,22 @@ final class OpenApiDriftSpec
       Post("/api/v1/stores", RegisterStoreRequest(None, "IGA Beaubien", "iga", "H2X", None)),
     ("get", "/api/v1/stores/resolve") -> Get("/api/v1/stores/resolve?q=metro"),
     ("get", "/api/v1/stores/{id}") -> Get("/api/v1/stores/s-1"),
-    ("get", "/health") -> Get("/health")
+    ("get", "/health") -> Get("/health"),
+    ("post", "/api/v1/purchases") ->
+      Post(
+        "/api/v1/purchases",
+        RecordPurchaseRequest(
+          "pur-1",
+          "store-1",
+          "2026-11-10T14:30:00Z",
+          List(PurchaseLineRequest("prod-1", "1", "4.99", "4.99")),
+          "4.99",
+          None,
+          None
+        )
+      ),
+    ("post", "/api/v1/purchases/{id}/void") ->
+      Post("/api/v1/purchases/pur-1/void", VoidPurchaseRequest("wrong store"))
   )
 
   // Reads are never reached: `handled` is decided by the router, and a repository that
@@ -85,11 +100,17 @@ final class OpenApiDriftSpec
     (_, _) => Future.successful(Right(()))
   private val storeDecide: (StoreId, StoreCommand) => Future[Either[String, Unit]] =
     (_, _) => Future.successful(Right(()))
+  private val purchaseDecide: (
+      me.cference.ariadne.domain.PurchaseId,
+      me.cference.ariadne.domain.purchase.PurchaseCommand
+  ) => Future[Either[String, Unit]] =
+    (_, _) => Future.successful(Right(()))
 
   private val routes = concat(
     new CatalogRoutes(repo).routes,
     new ReviewRoutes(repo, decide).routes,
     new StoreRoutes(repo, new StoreResolver(repo), storeDecide).routes,
+    new PurchaseRoutes(purchaseDecide).routes,
     HealthRoutes("test", () => true),
     new DocsRoutes().routes
   )
@@ -120,8 +141,8 @@ final class OpenApiDriftSpec
       // dionysus-planner's gate would have silently matched zero routes after a
       // refactor and passed green. A parser that finds nothing must fail, not pass —
       // this assertion is the difference between failing closed and failing open.
-      documented.size should be >= 14
-      documented.map(_._2).distinct.size should be >= 13
+      documented.size should be >= 16
+      documented.map(_._2).distinct.size should be >= 15
     }
   }
 

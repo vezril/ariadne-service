@@ -157,6 +157,42 @@ object JsonFormats extends DefaultJsonProtocol {
       externalId: Option[String]
   )
 
+  /**
+   * One receipt line. Money is a decimal STRING end to end (§5): `4.99` has no exact binary
+   * representation, and a float here would put a rounding artefact into both price history and the
+   * budgeting feed.
+   *
+   * `lineTotal` is stated rather than computed from quantity x pricePaid, because a till rounds and
+   * applies line discounts in ways a client cannot reproduce. The aggregate checks the lines sum to
+   * the stated total, so a mis-stated line is refused rather than silently absorbed.
+   */
+  final case class PurchaseLineRequest(
+      productId: String,
+      quantity: String,
+      pricePaid: String,
+      lineTotal: String
+  )
+
+  /**
+   * `id` is REQUIRED, unlike every other write on this surface (§7.1).
+   *
+   * The caller mints it, and that is what makes a retry addressable: Ariadne being unreachable
+   * cannot block someone typing a receipt, so the client buffers locally and drains an outbox. A
+   * server-derived id would not help — the request never arrived, so there is no id to rediscover.
+   * Re-recording the same purchase is a no-op success precisely so that outbox can drain.
+   */
+  final case class RecordPurchaseRequest(
+      id: String,
+      storeId: String,
+      purchasedAt: String,
+      lines: List[PurchaseLineRequest],
+      total: String,
+      source: Option[String],
+      receiptBlobId: Option[String]
+  )
+
+  final case class VoidPurchaseRequest(reason: String)
+
   given RootJsonFormat[ProductView] = jsonFormat7(ProductView.apply)
   given RootJsonFormat[SubjectView] = jsonFormat5(SubjectView.apply)
   given RootJsonFormat[CaseView] = jsonFormat5(CaseView.apply)
@@ -172,6 +208,9 @@ object JsonFormats extends DefaultJsonProtocol {
   given RootJsonFormat[ProductResolutionView] = jsonFormat6(ProductResolutionView.apply)
   given RootJsonFormat[RegisterStoreRequest] = jsonFormat5(RegisterStoreRequest.apply)
   given RootJsonFormat[ResolveProductRequest] = jsonFormat5(ResolveProductRequest.apply)
+  given RootJsonFormat[PurchaseLineRequest] = jsonFormat4(PurchaseLineRequest.apply)
+  given RootJsonFormat[RecordPurchaseRequest] = jsonFormat7(RecordPurchaseRequest.apply)
+  given RootJsonFormat[VoidPurchaseRequest] = jsonFormat1(VoidPurchaseRequest.apply)
 
   given RootJsonFormat[ProductsResponse] = jsonFormat1(ProductsResponse.apply)
   given RootJsonFormat[CasesResponse] = jsonFormat1(CasesResponse.apply)

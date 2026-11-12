@@ -203,6 +203,57 @@ paths:
       responses:
         "200": { description: The franchise, content: { application/json: { schema: { $ref: "#/components/schemas/Store" } } } }
         "404": { description: No such store, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /api/v1/purchases:
+    post:
+      tags: [purchases]
+      summary: Record a purchase (§7, manual entry)
+      description: |
+        **`id` is required, and the caller mints it** — unlike every other write here, where the
+        server can derive one. Ariadne being unreachable must not block someone typing a receipt: a
+        dropped receipt is lost user data and, unlike a price, can never be reconstructed. So the
+        client keeps a local write-ahead row and drains it, which makes a caller-minted id the thing
+        that makes a retry addressable at all.
+
+        **Re-recording the SAME purchase is 202, not 409.** That is what lets that outbox drain — an
+        error would be indistinguishable from a genuine failure and the row would retry forever.
+        Sameness is decided by content, not by the caller asserting it. A *different* purchase under
+        a taken id is a genuine 409: that is an id collision, and accepting it would overwrite one
+        receipt with another.
+
+        Every line also becomes a price fact at `exact{storeId}` with `source = purchase` (§2.4).
+        Prices actually paid are the best facts the catalog gets, so the append is a standing policy
+        rather than an option on this call.
+
+        Money is a decimal **string** throughout: `4.99` has no exact binary representation, and a
+        float would put a rounding artefact into both price history and the budgeting feed.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/RecordPurchase" } } }
+      responses:
+        "202": { description: Accepted — including an identical re-record, which is a no-op success, content: { application/json: { schema: { $ref: "#/components/schemas/Accepted" } } } }
+        "400": { description: Malformed money/timestamp, empty or non-positive line, or a receipt source with no blob id, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: A DIFFERENT purchase already recorded under this id, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /api/v1/purchases/{id}/void:
+    post:
+      tags: [purchases]
+      summary: Void a purchase
+      description: |
+        Corrections are new facts, not edits — both events persist, because the audit trail is the
+        point. A mistake is voided and then re-recorded under a new id.
+
+        **Voiding does NOT retract the price facts the purchase produced.** The price paid was still
+        paid; a void corrects the purchase record (a mistyped total, the wrong store), and deleting
+        price history on that basis would remove a fact Demeter may already have scored against. A
+        genuinely wrong price is retracted explicitly as a price observation.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/VoidPurchase" } } }
+      responses:
+        "202": { description: Voided, content: { application/json: { schema: { $ref: "#/components/schemas/Accepted" } } } }
+        "400": { description: Missing reason, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: Not recorded, or already voided, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /health:
     get:
       summary: Liveness and readiness
@@ -333,6 +384,30 @@ components:
               productId: { type: string }
               score: { type: number, format: double }
               notes: { type: array, items: { type: string } }
+    PurchaseLine:
+      type: object
+      required: [productId, quantity, pricePaid, lineTotal]
+      properties:
+        productId: { type: string, description: Resolve unknown receipt text first; an unmatched item takes a Provisional product and surfaces in the review queue }
+        quantity: { type: string, description: Decimal string; must be positive }
+        pricePaid: { type: string, description: Decimal string — unit price actually charged, which becomes the price fact }
+        lineTotal: { type: string, description: Decimal string. Stated rather than computed, because a till rounds and applies line discounts a client cannot reproduce }
+    RecordPurchase:
+      type: object
+      required: [id, storeId, purchasedAt, lines, total]
+      properties:
+        id: { type: string, description: REQUIRED and caller-minted — what makes a retry addressable (§7.1) }
+        storeId: { type: string, description: A StoreId, not free text. Resolve typed receipt text via GET /api/v1/stores/resolve first — which never picks for you }
+        purchasedAt: { type: string, format: date-time, description: ISO-8601. Refused if in the future }
+        lines: { type: array, minItems: 1, items: { $ref: "#/components/schemas/PurchaseLine" } }
+        total: { type: string, description: Decimal string. Must equal the sum of lineTotal — a receipt whose parts disagree with its whole is a parse failure, and recording it would put a number into budgeting that no till printed }
+        source: { type: string, enum: [manual, receipt], default: manual }
+        receiptBlobId: { type: string, nullable: true, description: Required when source is receipt; a scan it cannot name is recorded as manual rather than claiming a provenance it cannot show }
+    VoidPurchase:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, description: Required — a void with no reason loses why the correction happened }
     Accepted:
       type: object
       properties:

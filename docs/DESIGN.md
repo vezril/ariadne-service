@@ -635,18 +635,49 @@ v1.1 — flagged as an open question, not landed.
 
 ### The publisher — an event-sourced outbox projection
 
-No dual-write. The Hermes publisher is a **Pekko Projection over the journal** (`hermes-publisher`
-in §3): it reads committed events by tag, maps domain event → Lexicon message, publishes via the
-pinned `hermesmq-client` (@v1.13.0), and only then advances its offset.
+**BUILT 2026-09-07.** No dual-write. The publisher is a **Pekko Projection over the journal**:
+it reads committed events, maps domain event → message, publishes, and only then advances its
+offset.
+
+Three corrections to what this section said before it was built, each found by building it:
+
+1. **The client.** §5 said "the pinned `hermesmq-client` (@v1.13.0)". *That artifact and version do
+   not exist* — hermesmq's tags stop at v1.9.1 and its client is published only as a dynver
+   snapshot. The fleet's working path is the Lexicon's gRPC stubs (`io.codex %% lexicon-hermes-grpc`,
+   pinned 0.8.0), which artemis-service has run in production since v1.2.x. Ariadne follows the
+   precedent that exists rather than the pin that does not.
+2. **Three projections, not one.** `eventsBySlices` subscribes by entity type, so there is one
+   publisher per type (product, price, purchase). Each has its OWN `ProjectionId`, and that is
+   operational rather than cosmetic: sharing an offset with a read model would make a Hermes outage
+   stall the read models, so the REST surface would go stale because a broker was unreachable.
+3. **The contract does not exist.** The Lexicon has no product-catalog schema. Its only
+   `catalog.proto` reserves `PostCreated`/`TagsChanged`/`PostPurged` for a *different* Ariadne — an
+   analytics consumer of Artemis's media catalog — which is a **name collision**, not this service.
+   `docs/lexicon-proposal-catalog.proto` is the proposal; payloads are hand-encoded to its canonical
+   protobuf JSON so adopting the contract changes the encoder and not the bytes. **A consumer
+   building against these payloads today is building against a proposal**, and should know it.
+
+**Deduplication is the broker's, not every consumer's.** The deterministic
+`{persistenceId}:{seqNr}` rides as the publish `idempotency_key`, so an at-least-once republish
+collapses at the source instead of making every consumer in the constellation responsible for
+detecting duplicates.
 
 - **At-least-once, restart-safe:** offset commits after successful publish → crash between
   publish and commit ⇒ re-publish, never a lost event. Consumers must be idempotent (they already
   must be, constellation-wide); every message carries a deterministic `messageId`
   (`{persistenceId}:{seqNr}`) so duplicates are detectable.
 - **Ordering:** per-entity order is guaranteed by the journal; that's the only ordering promised.
-- **Correlation:** the journaled `correlationId` is carried onto the published message (v1.13.0
-  tracing) — a scrape → resolve → observe → deal-alert chain is traceable end-to-end across
-  Ariadne → Hermes → Demeter.
+- **Correlation:** the journaled `correlationId` rides the published message, so a
+  scrape → resolve → observe → deal-alert chain is traceable end-to-end. The publisher reads the id
+  off the event rather than taking it from a caller — all three event traits declare
+  `def correlationId`, so no event can reach a publisher without one and the projection cannot
+  publish an id that disagrees with the journal.
+
+  *History, worth keeping:* this was found broken on 2026-09-07 while building the publisher —
+  every *command* carried a correlationId and `decide` dropped it, so §8's "journal it on every
+  event" had never been implemented and the publisher sent an empty string rather than mint a
+  traceable-LOOKING id that linked to nothing. The field was added to every journaled event while
+  the journal was still empty, which was the cheap moment to do it.
 - **Backpressure/outage:** Hermes down ⇒ the projection retries with backoff and simply lags
   (offset doesn't advance); the write side is unaffected. `/health` readiness reports the lag;
   a `ariadne_hermes_publisher_lag` gauge feeds Hera.
@@ -921,12 +952,25 @@ candidate lists prove insufficient against real receipts, not before.
 
 ## 8. Cross-cutting
 
-- **Correlation-id (HermesMQ v1.13.0 discipline):** adopt from incoming gRPC metadata / REST
-  header / Hermes message when present, mint (ULID) at every edge otherwise; journal it on every
+- **Correlation-id — JOURNALLED ON EVERY EVENT, 2026-09-07.** Adopt from incoming gRPC metadata /
+  REST header / Hermes message when present, mint at every edge otherwise; journal it on every
   event; echo it on every response and every published message; MDC-propagated into logs
   (Apollo's `tracing/CorrelationId` + `MdcPropagatingExecutionContext` pattern). A flyer scrape
   is an edge → each scrape run mints one cid, so listing→resolution→observation→Demeter-alert is
   one traceable thread.
+
+  **This claim was false for weeks, and nothing failed.** Every *command* carried a
+  `correlationId` and `decide` dropped it, so no event in the journal had one — the trace stopped
+  dead at the write boundary while §8 said otherwise. Found 2026-09-07 while building the Hermes
+  publisher, which needed to read the id off a committed event and found nothing there.
+
+  It is now a **field on every journaled event**. Pekko 1.2.0 exposes no user event-metadata API
+  (`persistWithMetadata` does not exist there), so a field is the mechanism rather than a choice.
+  `StoreDeactivated` became a case class for it: a parameterless event cannot carry the correlation
+  that caused it, and "every event except that one" is the kind of exception that quietly becomes a
+  gap in a trace. `CorrelationPropagationSpec` asserts it per aggregate rather than spot-checking
+  one — a single check would pass while three aggregates dropped it, which is the state this was
+  actually in.
 - **Health/metrics:** `/health` liveness + readiness (journal, projection lag, Hermes lag);
   `/metrics` Prometheus with Hera scrape annotations. Key gauges/counters: observations appended
   (by source), resolver outcomes (by band and by `matcher_version` — the

@@ -41,6 +41,9 @@ final class SerializationSpec
     with AnyWordSpecLike
     with Matchers {
 
+  /** One correlation id for the whole spec: these tests assert shapes, not tracing. */
+  private val cid = me.cference.ariadne.domain.CorrelationId("c-test")
+
   private val ser = SerializationExtension(system.classicSystem)
 
   private def roundTrip[A <: AnyRef](original: A): A = {
@@ -65,7 +68,8 @@ final class SerializationSpec
         Some(packSize),
         Some(gtin),
         Origin.Scrape("flipp", Some(listing)),
-        ProductStatus.Provisional
+        ProductStatus.Provisional,
+        cid
       )
       roundTrip(e) shouldBe e
     }
@@ -83,7 +87,8 @@ final class SerializationSpec
         None,
         None,
         Origin.Scrape("flipp", None),
-        ProductStatus.Provisional
+        ProductStatus.Provisional,
+        cid
       )
       roundTrip(e) shouldBe e
     }
@@ -99,7 +104,8 @@ final class SerializationSpec
         None,
         None,
         Origin.Manual,
-        ProductStatus.Active
+        ProductStatus.Active,
+        cid
       )
       roundTrip(e) shouldBe e
     }
@@ -109,18 +115,18 @@ final class SerializationSpec
         listing,
         Confidence.unsafe(0.93),
         MatchMethod.Fuzzy,
-        MatcherVersion("v1")
+        MatcherVersion("v1"),
+        cid
       )
       roundTrip(e) shouldBe e
       roundTrip(e).confidence.toDouble shouldBe 0.93
     }
 
     "round-trip a merge tombstone and an absorption with its key sets" in {
-      roundTrip(ProductEvent.ProductMerged(ProductId("p-9"))) shouldBe ProductEvent.ProductMerged(
-        ProductId("p-9")
-      )
+      val merged = ProductEvent.ProductMerged(ProductId("p-9"), cid)
+      roundTrip(merged) shouldBe merged
       val absorbed =
-        ProductEvent.ProductAbsorbed(ProductId("p-9"), Set(gtin), Set("beurre"), Set(listing))
+        ProductEvent.ProductAbsorbed(ProductId("p-9"), Set(gtin), Set("beurre"), Set(listing), cid)
       roundTrip(absorbed) shouldBe absorbed
     }
   }
@@ -132,11 +138,12 @@ final class SerializationSpec
         "IGA Plateau",
         ChainId("iga"),
         Area("H2X"),
-        Some("Plateau")
+        Some("Plateau"),
+        cid
       )
       roundTrip(reg) shouldBe reg
       // A case object is the shape most likely to be mangled into a bare string.
-      roundTrip(StoreEvent.StoreDeactivated) shouldBe StoreEvent.StoreDeactivated
+      roundTrip(StoreEvent.StoreDeactivated(cid)) shouldBe StoreEvent.StoreDeactivated(cid)
     }
   }
 
@@ -152,7 +159,8 @@ final class SerializationSpec
         Confidence.Certain,
         Confidence.unsafe(0.4),
         Instant.parse("2026-08-26T12:00:00Z"),
-        PriceSource.Purchase(PurchaseId("pu-1"))
+        PriceSource.Purchase(PurchaseId("pu-1")),
+        cid
       )
       roundTrip(e) shouldBe e
     }
@@ -170,7 +178,8 @@ final class SerializationSpec
         Confidence.Certain,
         Confidence.Certain,
         Instant.parse("2026-08-26T12:00:00Z"),
-        PriceSource.Scrape("flipp", rawResponseId = 1L)
+        PriceSource.Scrape("flipp", rawResponseId = 1L),
+        cid
       )
       val back = roundTrip(e)
       back shouldBe e
@@ -194,7 +203,8 @@ final class SerializationSpec
           Confidence.Certain,
           Confidence.Certain,
           Instant.parse("2026-08-26T12:00:00Z"),
-          src
+          src,
+          cid
         )
         roundTrip(e).source shouldBe src
       }
@@ -210,7 +220,8 @@ final class SerializationSpec
         List(
           ScoredCandidate(ProductId("p-a"), Confidence.unsafe(0.81), List("size conflict")),
           ScoredCandidate(ProductId("p-b"), Confidence.unsafe(0.74), Nil)
-        )
+        ),
+        cid
       )
       roundTrip(e) shouldBe e
     }
@@ -226,7 +237,7 @@ final class SerializationSpec
         Confidence.Certain,
         Confidence.unsafe(0.4)
       )
-      val e = ResolutionEvent.ResolutionConfirmed(ProductId("p-a"), List(parked, parked))
+      val e = ResolutionEvent.ResolutionConfirmed(ProductId("p-a"), List(parked, parked), cid)
       val back = roundTrip(e)
       back shouldBe e
       back.released should have size 2
@@ -244,7 +255,8 @@ final class SerializationSpec
           PurchaseLine(ProductId("p-1"), BigDecimal(2), money, Money.unsafe(BigDecimal("9.98")))
         ),
         Money.unsafe(BigDecimal("9.98")),
-        PurchaseSource.Receipt("blob-1")
+        PurchaseSource.Receipt("blob-1"),
+        cid
       )
       roundTrip(e) shouldBe e
     }

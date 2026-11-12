@@ -1,0 +1,152 @@
+// PROPOSAL to the Lexicon session — NOT landed, NOT generated from.
+//
+// Ariadne publishes these three messages today (DESIGN §5). The payloads it emits are
+// hand-encoded to this shape's canonical protobuf JSON, so adopting the contract swaps
+// the encoder without changing a byte on the wire.
+//
+// WHY THIS IS A PROPOSAL AND NOT A PR TO the-lexicon: contracts ripple across every
+// service, and the working agreement is propose, don't land. Ariadne is one producer
+// with two prospective consumers; the shape below is what it actually emits, offered as
+// the starting point rather than the answer.
+//
+// NAME COLLISION, flagged 2026-09-07 — please read before filing this anywhere:
+// `codex/messages/v1/catalog.proto` already exists in the Lexicon and says it is
+// "RESERVED for the future Ariadne extraction". It is NOT this service. Its shapes are
+// PostCreated / TagsChanged / PostPurged — Artemis's media catalog, with an analytics
+// consumer someone planned to call Ariadne. This Ariadne is the Product Catalog
+// (products, prices, purchases), seeded 2026-08-26 per codex/docs/product-catalog.md.
+// Two different things are currently called Ariadne in the Lexicon's namespace, and one
+// of them owns a file named `catalog`. Worth renaming one before either ships.
+
+syntax = "proto3";
+
+package codex.messages.v1;
+
+// ---------------------------------------------------------------- shared
+
+// Money is a decimal STRING, never a float or a double. A price is exact; 4.99 has no
+// binary representation, and a consumer comparing prices for a deal would be comparing
+// rounding artefacts.
+message Money {
+  string amount = 1;    // decimal, e.g. "4.99"
+  string currency = 2;  // ISO 4217, e.g. "CAD"
+}
+
+message Quantity {
+  string amount = 1;  // decimal
+  string unit = 2;    // stable enum NAME (e.g. "Gram"), not a display label
+}
+
+// WHICH STORES A PRICE SPEAKS FOR (DESIGN §2.3.1). This is the field consumers most need
+// and would most easily get wrong if it were flattened.
+//
+// A flyer feed cannot name an individual franchise — merchant plus queried postal code is
+// the finest grain it offers — so a scraped price is an AREA fact. Recording it as one
+// store's price under-counts coverage; expanding it to N member stores fabricates N facts.
+// Deal alerting is wrong in both directions without this.
+message PriceScope {
+  oneof kind {
+    ExactScope exact = 1;   // observed AT a store (a receipt, a store-specific price)
+    AreaScope area = 2;     // a chain's flyer for a region
+  }
+}
+message ExactScope { string store_id = 1; }
+message AreaScope {
+  string chain_id = 1;
+  string area = 2;  // flyer-coverage region (an FSA for Flipp sources)
+}
+
+message PriceSource {
+  oneof kind {
+    ScrapeSource scrape = 1;
+    PurchaseSource purchase = 2;
+    ManualSource manual = 3;
+    BackfillSource backfill = 4;
+  }
+}
+// `raw_response_id` is REQUIRED on a scrape: a scraped fact that cannot name the bytes it
+// was read out of cannot be re-derived when the decoder turns out to have been wrong.
+message ScrapeSource { string scraper = 1; string raw_response_id = 2; }
+message PurchaseSource { string purchase_id = 1; }
+message ManualSource {}
+message BackfillSource { string origin = 1; }
+
+enum ProductStatus {
+  PRODUCT_STATUS_UNSPECIFIED = 0;
+  PROVISIONAL = 1;   // auto-created from a scraped listing; prices flow immediately
+  ACTIVE = 2;
+  MERGED_INTO = 3;   // this id forwards; see merged_into
+  DEPRECATED = 4;
+}
+
+enum ProductOrigin {
+  PRODUCT_ORIGIN_UNSPECIFIED = 0;
+  MANUAL = 1;
+  SCRAPE = 2;
+  MIGRATION = 3;
+}
+
+// ---------------------------------------------- topic: product.registered
+
+// Also carries merges: a ProductMerged publishes here with status = MERGED_INTO and
+// merged_into set, so a consumer holding an id learns to re-point. Whether that overloads
+// the topic, or wants a dedicated product.merged, is DESIGN §10.1 — open, and a question
+// for the Lexicon rather than a decision Ariadne should make alone.
+message ProductRegistered {
+  string product_id = 1;
+  string name = 2;
+  string brand = 3;
+  string category = 4;      // coarse MARKET category — never food-role, which is Dionysus's
+  Quantity size = 5;
+  string gtin = 6;
+  ProductStatus status = 7;
+  ProductOrigin origin = 8;
+  string merged_into = 9;   // set only when status = MERGED_INTO
+}
+
+// ----------------------------------------- topic: product.price.observed
+
+// Demeter's required feed: "whenever PriceObserved on a watched product, then evaluate".
+message PriceObserved {
+  string product_id = 1;
+  PriceScope scope = 2;
+  Money price = 3;
+  UnitPrice unit_price = 4;
+  Promo promo = 5;
+
+  // BOTH confidences ride the message, and size_confidence is not optional decoration
+  // (DESIGN §2.3). Demeter's match confidence is the weakest link of its own split
+  // confidence and this one; omit it and downstream judgment silently reads too high.
+  double price_confidence = 6;
+  double size_confidence = 7;
+
+  string observed_at = 8;  // RFC 3339
+  PriceSource source = 9;
+}
+message UnitPrice { string amount = 1; string currency = 2; string per = 3; }
+// A flyer's own CLAIM about a promotion — a fact. Whether it is a good deal is Demeter's
+// judgment, and that line is the whole reason these are two services.
+message Promo { string description = 1; string percent_off = 2; }
+
+// ------------------------------------------- topic: purchase.recorded
+
+message PurchaseRecorded {
+  string purchase_id = 1;
+  string store_id = 2;
+  string purchased_at = 3;  // RFC 3339
+  repeated PurchaseLine lines = 4;
+  Money total = 5;
+  PurchaseSourceKind source = 6;
+}
+message PurchaseLine {
+  string product_id = 1;
+  string quantity = 2;  // decimal string
+  Money price_paid = 3;
+  Money line_total = 4;
+}
+enum PurchaseSourceKind {
+  PURCHASE_SOURCE_UNSPECIFIED = 0;
+  PURCHASE_MANUAL = 1;
+  RECEIPT = 2;
+  BANK_IMPORT = 3;
+}
