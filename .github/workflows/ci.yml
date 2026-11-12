@@ -11,9 +11,23 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Least privilege: CI only reads the repo (no package/image publish here).
+# Least privilege: CI reads the repo, plus GitHub Packages to resolve the Lexicon jars.
 permissions:
   contents: read
+  packages: read
+
+# Resolving io.codex:lexicon-* from the-lexicon's GitHub Packages needs auth even though the
+# package is public — an unauthenticated Maven read gets a 401. build.sbt adds the resolver
+# and credential only when one of these is set; without either, resolution falls through to
+# Maven Central, which has never held io.codex, and every sbt job dies at `update`.
+#
+# LEXICON_TOKEN (a read:packages PAT) wins when present, matching artemis-service and
+# apollo-storage. The built-in GITHUB_TOKEN is the fallback and is sufficient on its own —
+# verified in CI — so no repo secret has to be minted by hand for a public package.
+# Workflow-level because every sbt job needs it, not just one.
+env:
+  LEXICON_TOKEN: ${{ secrets.LEXICON_TOKEN }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   # Formatting is a separate job so a scalafmt violation fails independently of
