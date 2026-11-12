@@ -282,7 +282,9 @@ final class EndToEndProjectionSpec
               pid,
               seq,
               e
-          ) => me.cference.ariadne.hermes.CatalogMessages.price(topics, pid, seq, "", e),
+          ) =>
+            me.cference.ariadne.hermes.CatalogMessages
+              .price(topics, pid, seq, e.correlationId.value, e),
           ranges.head
         )
       ) {
@@ -295,6 +297,11 @@ final class EndToEndProjectionSpec
         // not a minted id.
         mine.head.messageId should startWith("price|p-hermes|area:iga:H9Y:")
         mine.head.attributes.get("productId") shouldBe Some("p-hermes")
+        // §8, the whole hop: the id on the ObservePrice command above survived the
+        // journal and came back out on the published message. Asserted end to end
+        // because the unit test can only prove the mapping, not that the real
+        // projection feeds it the event's own id rather than a blank.
+        mine.head.correlationId shouldBe "c-4"
       }
     }
   }

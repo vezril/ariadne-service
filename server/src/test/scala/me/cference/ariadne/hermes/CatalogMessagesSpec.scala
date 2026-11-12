@@ -38,13 +38,21 @@ final class CatalogMessagesSpec extends AnyWordSpec with Matchers {
     )
 
   private def priceMsg(scope: PriceScope, sc: Confidence = Confidence.Certain) =
-    CatalogMessages.price(topics, "price|p-1", 1L, "", observed(scope, sc)).get
+    CatalogMessages.price(topics, "price|p-1", 1L, cid.value, observed(scope, sc)).get
 
   "the message id" should {
     "be the journal's own coordinates, so a republish is recognisable" in {
       // At-least-once means the same event can publish twice; the broker collapses the
       // duplicate on this key. A minted id would make each retry a NEW message.
       CatalogMessages.messageId("price|p-1|area:iga:H2X", 4L) shouldBe "price|p-1|area:iga:H2X:4"
+    }
+  }
+
+  "the correlation id" should {
+    "ride the message, so a chain is traceable across services" in {
+      // §8. The id is the whole point of journaling it: a scrape -> resolve -> observe ->
+      // deal-alert chain is only followable in Demeter's logs if it survives the hop.
+      priceMsg(PriceScope.Exact(StoreId("s-1"))).correlationId shouldBe cid.value
     }
   }
 

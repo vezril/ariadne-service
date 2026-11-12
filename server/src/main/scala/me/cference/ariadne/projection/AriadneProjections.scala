@@ -167,15 +167,13 @@ object AriadneProjections {
     // The publishers are present only when a broker is configured. Read models are what
     // the service IS; publishing is what it tells other services, and the first must not
     // depend on the second.
-    // NOT YET AVAILABLE, and deliberately explicit rather than an inline "".
     //
-    // §8 promises the journaled correlationId rides every published message, so a
-    // scrape -> resolve -> observe -> deal-alert chain is traceable across services.
-    // It is not implemented: every COMMAND carries a correlationId and `decide` drops
-    // it, so no event in the journal has one to carry. Publishing an empty string is
-    // the honest behaviour until the events carry it; inventing one here would produce
-    // a traceable-looking id that links nothing.
-    val correlationUnavailable = ""
+    // §8: the journaled correlationId rides every published message, so a
+    // scrape -> resolve -> observe -> deal-alert chain is traceable across services. The
+    // id is read off the event itself rather than threaded in from the caller — all three
+    // event traits declare `def correlationId`, so there is no event that can reach a
+    // publisher without one, and the projection cannot accidentally publish a different
+    // id than the journal recorded.
     val publishers = hermes.toList.flatMap { case (client, topics) =>
       List(
         ProjectionDef(
@@ -186,8 +184,11 @@ object AriadneProjections {
                 "hermes-product",
                 ProductEntity.EntityPrefix,
                 client,
-                (pid, seq, e) =>
-                  CatalogMessages.product(topics, pid, seq, correlationUnavailable, e),
+                (
+                    pid,
+                    seq,
+                    e
+                ) => CatalogMessages.product(topics, pid, seq, e.correlationId.value, e),
                 r
               )
             )
@@ -200,7 +201,7 @@ object AriadneProjections {
                 "hermes-price",
                 PriceStreamEntity.EntityPrefix,
                 client,
-                (pid, seq, e) => CatalogMessages.price(topics, pid, seq, correlationUnavailable, e),
+                (pid, seq, e) => CatalogMessages.price(topics, pid, seq, e.correlationId.value, e),
                 r
               )
             )
@@ -214,7 +215,7 @@ object AriadneProjections {
                 PurchaseEntity.EntityPrefix,
                 client,
                 (pid, seq, e) =>
-                  CatalogMessages.purchase(topics, pid, seq, correlationUnavailable, e),
+                  CatalogMessages.purchase(topics, pid, seq, e.correlationId.value, e),
                 r
               )
             )

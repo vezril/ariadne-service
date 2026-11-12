@@ -667,14 +667,17 @@ detecting duplicates.
   must be, constellation-wide); every message carries a deterministic `messageId`
   (`{persistenceId}:{seqNr}`) so duplicates are detectable.
 - **Ordering:** per-entity order is guaranteed by the journal; that's the only ordering promised.
-- **Correlation — NOT YET IMPLEMENTED, found 2026-09-07 while building the publisher.** The
-  intended behaviour is that the journaled `correlationId` rides the published message, so a
-  scrape → resolve → observe → deal-alert chain is traceable end-to-end. It cannot: **no event in
-  the journal carries a correlationId.** Every *command* has one and `decide` drops it, so §8's
-  "journal it on every event" was never implemented. The publisher sends an empty correlation id,
-  which is the honest behaviour — minting one at publish time would produce a traceable-LOOKING id
-  that links to nothing. Fixing it means adding the field to every journaled event: cheap now while
-  the journal is empty, expensive once it is not.
+- **Correlation:** the journaled `correlationId` rides the published message, so a
+  scrape → resolve → observe → deal-alert chain is traceable end-to-end. The publisher reads the id
+  off the event rather than taking it from a caller — all three event traits declare
+  `def correlationId`, so no event can reach a publisher without one and the projection cannot
+  publish an id that disagrees with the journal.
+
+  *History, worth keeping:* this was found broken on 2026-09-07 while building the publisher —
+  every *command* carried a correlationId and `decide` dropped it, so §8's "journal it on every
+  event" had never been implemented and the publisher sent an empty string rather than mint a
+  traceable-LOOKING id that linked to nothing. The field was added to every journaled event while
+  the journal was still empty, which was the cheap moment to do it.
 - **Backpressure/outage:** Hermes down ⇒ the projection retries with backoff and simply lags
   (offset doesn't advance); the write side is unaffected. `/health` readiness reports the lag;
   a `ariadne_hermes_publisher_lag` gauge feeds Hera.
