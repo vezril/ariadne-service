@@ -293,8 +293,9 @@ final class EndToEndProjectionSpec
           .filter(_.payload.contains("p-hermes"))
         mine should not be empty
         mine.head.topic shouldBe "product.price.observed"
-        // The idempotency key the broker dedups a republish on — journal coordinates,
-        // not a minted id.
+        // Journal coordinates, not a minted id, so a republish is RECOGNISABLE to a
+        // consumer that tracks what it has seen. It is not deduplicated for them: broker
+        // dedup is off by default (§5), so this id is a courtesy and not a guarantee.
         mine.head.messageId should startWith("price|p-hermes|area:iga:H9Y:")
         mine.head.attributes.get("productId") shouldBe Some("p-hermes")
         // §8, the whole hop: the id on the ObservePrice command above survived the
