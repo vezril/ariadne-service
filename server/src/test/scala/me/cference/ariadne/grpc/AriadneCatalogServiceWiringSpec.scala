@@ -42,6 +42,19 @@ final class AriadneCatalogServiceWiringSpec extends AnyWordSpec with Matchers wi
       Future.successful(canonical.get(id))
     def searchProducts(term: String, limit: Int): Future[List[ProductRow]] =
       Future.successful(products.values.toList.filter(_.name.contains(term)).take(limit))
+    def listProducts(
+        statuses: List[String],
+        category: Option[String],
+        afterId: Option[String],
+        limit: Int
+    ): Future[List[ProductRow]] = {
+      val all = products.values.toList.sortBy(_.id)
+      val filtered = all
+        .filter(p => statuses.isEmpty || statuses.contains(p.status))
+        .filter(p => category.forall(c => p.category.contains(c)))
+        .dropWhile(p => afterId.exists(p.id <= _))
+      Future.successful(filtered.take(limit))
+    }
     def currentPrice(productId: String, storeId: String): Future[Option[ResolvedPrice]] =
       Future.successful(None)
     def priceHistory(
@@ -111,6 +124,70 @@ final class AriadneCatalogServiceWiringSpec extends AnyWordSpec with Matchers wi
         .getProduct(pb.GetProductRequest(productId = "x"))
         .futureValue
         .correlationId should not be empty
+    }
+  }
+
+  "ListProducts" should {
+
+    "page by keyset, so a catalog being written while it is read does not skip or repeat" in {
+      // An OFFSET page over a catalog the scrape resolver writes continuously would skip or
+      // repeat rows. The token is the last id of the page.
+      val repo0 = new StubReads(products = (1 to 5).map(i => s"p-$i" -> row(s"p-$i")).toMap)
+      val first =
+        service(repo0).listProducts(pb.ListProductsRequest(limit = 2)).futureValue
+      first.products.map(_.productId) shouldBe Seq("p-1", "p-2")
+      first.nextPageToken shouldBe "p-2"
+
+      val second = service(repo0)
+        .listProducts(pb.ListProductsRequest(limit = 2, pageToken = first.nextPageToken))
+        .futureValue
+      second.products.map(_.productId) shouldBe Seq("p-3", "p-4")
+    }
+
+    "stop emitting a token when the page is not full" in {
+      // The caller's signal for "last page" is the empty token, not a short page.
+      val repo0 = new StubReads(products = (1 to 3).map(i => s"p-$i" -> row(s"p-$i")).toMap)
+      val page = service(repo0).listProducts(pb.ListProductsRequest(limit = 10)).futureValue
+      page.products should have size 3
+      page.nextPageToken shouldBe ""
+    }
+
+    "NOT filter when no status is given, so the review queue stays visible" in {
+      // A default that hid PROVISIONAL products would make anything paging the catalog
+      // blind to exactly the products a human still has to decide about.
+      val repo0 = new StubReads(products =
+        Map("p-1" -> row("p-1", "provisional"), "p-2" -> row("p-2", "active"))
+      )
+      service(repo0)
+        .listProducts(pb.ListProductsRequest())
+        .futureValue
+        .products
+        .map(_.productId) shouldBe Seq("p-1", "p-2")
+    }
+
+    "treat UNSPECIFIED as no filter rather than as a status to match" in {
+      // Passing it through would match no stored status and return an empty page, which
+      // reads as an empty catalog.
+      val repo0 = new StubReads(products = Map("p-1" -> row("p-1", "active")))
+      service(repo0)
+        .listProducts(
+          pb.ListProductsRequest(statuses = Seq(pb.ProductStatus.PRODUCT_STATUS_UNSPECIFIED))
+        )
+        .futureValue
+        .products should have size 1
+    }
+
+    "filter to the statuses asked for" in {
+      val repo0 = new StubReads(products =
+        Map("p-1" -> row("p-1", "provisional"), "p-2" -> row("p-2", "active"))
+      )
+      service(repo0)
+        .listProducts(
+          pb.ListProductsRequest(statuses = Seq(pb.ProductStatus.PRODUCT_STATUS_ACTIVE))
+        )
+        .futureValue
+        .products
+        .map(_.productId) shouldBe Seq("p-2")
     }
   }
 

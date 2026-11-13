@@ -140,7 +140,8 @@ final class AriadneCatalogServiceSpec extends AnyWordSpec with Matchers {
           1.0,
           Some("store-1"),
           None,
-          None
+          None,
+          1.0
         )
       toScope(exact).scope shouldBe pb.PriceScope.Scope.Exact(pb.ExactScope("store-1"))
 
@@ -154,7 +155,8 @@ final class AriadneCatalogServiceSpec extends AnyWordSpec with Matchers {
           0.5,
           None,
           Some("iga"),
-          Some("H2X")
+          Some("H2X"),
+          0.9
         )
       toScope(area).scope shouldBe pb.PriceScope.Scope.Area(pb.AreaScope("iga", "H2X"))
     }

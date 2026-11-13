@@ -247,12 +247,40 @@ CREATE TABLE IF NOT EXISTS current_price (
   observed_at     TIMESTAMPTZ NOT NULL,
   source          TEXT NOT NULL,
   size_confidence DOUBLE PRECISION NOT NULL,
+  -- Added 2026-11-13. It was absent, and its absence was load-bearing in the wrong
+  -- direction: gRPC GetCurrentPrice could not report price confidence at all, and a
+  -- proto3 double defaults to 0.0 — which a consumer reads as "no confidence" rather
+  -- than "not known". §2.3 says BOTH confidences ride every price fact; price_history
+  -- already carried both, and this is the projection catching up to the event.
+  --
+  -- NOT NULL with a default, so applying this to an existing database does not have to
+  -- backfill before the column is usable. 1.0 is the honest default for the rows that
+  -- predate it: every source that writes here (scrape, purchase, manual) states a real
+  -- confidence, and the projection overwrites on the next observation anyway.
+  price_confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
   PRIMARY KEY (product_id, scope_key)
 );
 
 -- ---------------------------------------------------------------------------
 -- purchase-history
 -- ---------------------------------------------------------------------------
+-- DELIBERATELY EMPTY, and that is the whole note: NOTHING WRITES THESE TABLES.
+--
+-- Settled 2026-11-13 after the gRPC build surfaced the disagreement. DESIGN §3 gives the
+-- Purchase aggregate an offset-only projection (the §2.4 price-append process manager)
+-- and no read model, while this DDL declares a read model for it — so the schema and §3
+-- contradicted each other, and anyone finding these tables empty would reasonably
+-- conclude a projection was broken.
+--
+-- Kept rather than dropped, because they anticipate a consumer that is coming: budgeting
+-- (Plutus) will consume `purchase.recorded` over Hermes as its own service. The schema is
+-- a considered design and re-deriving it later is wasted work.
+--
+-- NOT filled now, because nothing in the catalog queries purchases. Building the
+-- projection today would be building for a consumer that does not exist, and gRPC
+-- `ListPurchases` stays deferred for the same reason (see ariadne/v1/ariadne.proto).
+--
+-- So: empty is correct. If you are here because they are empty, this is why.
 CREATE TABLE IF NOT EXISTS purchases (
   id             TEXT PRIMARY KEY,
   store_id       TEXT NOT NULL,

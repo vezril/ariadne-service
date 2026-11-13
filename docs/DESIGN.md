@@ -621,18 +621,29 @@ a missing opinion:**
 
 | RPC | Why not yet |
 |---|---|
-| `ListProducts` | No paged/filtered product query on the read model |
-| `ListPurchases` | No projection writes the `purchases`/`purchase_lines` tables — see below |
-| — | `GetCurrentPrice` carries `size_confidence` but NOT `price_confidence`: `current_price` does not store it (only `price_history` does), and a defaulted `0.0` would read as "no confidence" rather than "not known". The proto reserves the field number for a projection that has it. |
+| `ListProducts` | **CLOSED 2026-11-13** — keyset-paginated on the product id, filterable by status and category. Keyset rather than offset because the scrape resolver writes this catalog continuously, so an offset page skips or repeats rows as a matter of course. No implicit status filter: a default that hid PROVISIONAL products would make the review queue invisible to anything paging the catalog |
+| `GetCurrentPrice.price_confidence` | **CLOSED 2026-11-13** — the fix was the column, as the note said it would be. `current_price` now carries it, so both halves of §2.3 ride the current price as well as the history |
+| `ListPurchases` | **Still deferred, now deliberately** — see the purchases note below |
 
 **Found while building this: `price_history` was write-only.** The projection appended to it and
 nothing ever selected from it, so the table demeter-insight is supposed to re-point at during the
 Demeter migration had no read path at all. `GetPriceHistory` is that read path.
 
-**Also found: the DDL declares `purchases` and `purchase_lines`, and nothing writes them.** §3
-gives the Purchase aggregate an offset-only projection and no read model, so the schema and §3
-disagree. Worth settling deliberately — either the tables go, or a projection fills them and
-`ListPurchases` follows.
+**The `purchases` / `purchase_lines` disagreement — SETTLED 2026-11-13: keep the tables, leave
+them empty, document why.**
+
+The DDL declared a read model that §3 does not give this aggregate, so the two contradicted each
+other and anyone finding the tables empty would reasonably conclude a projection was broken.
+
+Kept rather than dropped, because they anticipate a consumer that is coming: budgeting (Plutus)
+will consume `purchase.recorded` over Hermes as its own service, and the schema is a considered
+design that re-deriving later is wasted work. Not filled now, because nothing in the catalog
+queries purchases — building the projection today is building for a consumer that does not exist,
+and `ListPurchases` stays deferred for the same reason.
+
+The resolution is therefore a COMMENT, not code: the DDL now says the tables are deliberately
+empty and why, so the next person to find them does not go looking for the bug. A disagreement
+between a schema and a design doc is only a problem while it is unexplained.
 
 The consequence to keep in view: this surface now has **two consumers**, so the OpenAPI document is
 a published contract rather than an affordance Ariadne can change freely. That is what the drift

@@ -81,6 +81,37 @@ final class AriadneCatalogService(
     }
   }
 
+  /**
+   * A page of the catalog, keyset-paginated on the product id.
+   *
+   * `next_page_token` is the last id of this page, opaque to the caller, and is set only when a
+   * FULL page came back. A caller must not infer "last page" from a short page: a filtered query
+   * can return fewer rows than the limit and still have more to give. Emitting a token on a short
+   * page instead would cost one wasted empty round trip rather than a wrong answer — the cheap
+   * error is the one taken.
+   */
+  def listProducts(in: pb.ListProductsRequest): Future[pb.ListProductsResponse] = {
+    val limit = clamp(in.limit, default = 100, max = 500)
+    reads
+      .listProducts(
+        // UNSPECIFIED is not a filter. Passing it through would match no stored status and
+        // return an empty page that reads as an empty catalog.
+        statuses = in.statuses.toList
+          .filterNot(_ == pb.ProductStatus.PRODUCT_STATUS_UNSPECIFIED)
+          .map(statusName),
+        category = Option(in.category).map(_.trim).filter(_.nonEmpty),
+        afterId = Option(in.pageToken).map(_.trim).filter(_.nonEmpty),
+        limit = limit
+      )
+      .map { rows =>
+        pb.ListProductsResponse(
+          products = rows.map(toProduct),
+          nextPageToken = if rows.sizeIs == limit then rows.last.id else "",
+          correlationId = correlation(in.correlationId)
+        )
+      }
+  }
+
   def searchProducts(in: pb.SearchProductsRequest): Future[pb.SearchProductsResponse] =
     reads
       .searchProducts(in.query, clamp(in.limit, default = 20, max = 100))
@@ -160,6 +191,7 @@ final class AriadneCatalogService(
             observedAt = p.observedAt.toString,
             source = p.source,
             sizeConfidence = p.sizeConfidence,
+            priceConfidence = p.priceConfidence,
             correlationId = cid
           )
       }
@@ -281,6 +313,12 @@ trait CatalogReads {
   def product(id: String): Future[Option[ProductRow]]
   def canonicalProductId(id: String): Future[Option[String]]
   def searchProducts(term: String, limit: Int): Future[List[ProductRow]]
+  def listProducts(
+      statuses: List[String],
+      category: Option[String],
+      afterId: Option[String],
+      limit: Int
+  ): Future[List[ProductRow]]
   def currentPrice(productId: String, storeId: String): Future[Option[ResolvedPrice]]
   def priceHistory(
       productId: String,
@@ -300,6 +338,12 @@ object CatalogReads {
       def canonicalProductId(id: String): Future[Option[String]] = repo.resolveCanonical(id)
       def searchProducts(term: String, limit: Int): Future[List[ProductRow]] =
         repo.searchProducts(term, limit)
+      def listProducts(
+          statuses: List[String],
+          category: Option[String],
+          afterId: Option[String],
+          limit: Int
+      ): Future[List[ProductRow]] = repo.listProducts(statuses, category, afterId, limit)
       def currentPrice(productId: String, storeId: String): Future[Option[ResolvedPrice]] =
         repo.currentPriceForStore(productId, storeId)
       def priceHistory(
@@ -334,6 +378,21 @@ object AriadneCatalogService {
       status = toStatus(r.status),
       mergedInto = r.mergedInto.getOrElse("")
     )
+
+  /**
+   * The inverse of `toStatus` — a proto enum to the string the read model stores.
+   *
+   * An explicit match rather than something derived from the enum name, so a rename on either side
+   * is a compile error here instead of a filter that silently matches nothing.
+   */
+  private[grpc] def statusName(s: pb.ProductStatus): String =
+    s match {
+      case pb.ProductStatus.PRODUCT_STATUS_PROVISIONAL => "provisional"
+      case pb.ProductStatus.PRODUCT_STATUS_ACTIVE => "active"
+      case pb.ProductStatus.PRODUCT_STATUS_MERGED_INTO => "merged_into"
+      case pb.ProductStatus.PRODUCT_STATUS_DEPRECATED => "deprecated"
+      case other => other.name.toLowerCase
+    }
 
   private[grpc] def toStatus(s: String): pb.ProductStatus =
     s.toLowerCase match {
