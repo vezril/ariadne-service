@@ -44,11 +44,23 @@ message Quantity {
 // the finest grain it offers — so a scraped price is an AREA fact. Recording it as one
 // store's price under-counts coverage; expanding it to N member stores fabricates N facts.
 // Deal alerting is wrong in both directions without this.
+// A THIRD VARIANT IS RESERVED, on the HermesMQ session's advice (2026-11-13), and the reason is
+// the timing rather than a known third kind: if consumers match this union exhaustively, adding a
+// variant later is a BREAKING change, and right now is the only window in which no consumer
+// exists. A plausible third is a national/banner-wide price (one price across every region), which
+// is neither exact nor area — but it is not needed today and inventing its fields now would be
+// guessing. Reserving the field number costs nothing and keeps the option.
+//
+// Consumers SHOULD treat an unrecognised variant as "a scope I cannot interpret" and skip the
+// fact, not fall back to exact or area — either fallback is one of the two silent errors this
+// union exists to prevent.
 message PriceScope {
   oneof kind {
     ExactScope exact = 1;   // observed AT a store (a receipt, a store-specific price)
     AreaScope area = 2;     // a chain's flyer for a region
+    // 3 reserved — see above.
   }
+  reserved 3;
 }
 message ExactScope { string store_id = 1; }
 message AreaScope {

@@ -105,8 +105,9 @@ object AriadneProjections {
    * Separate offsets mean a Hermes outage lags exactly one thing.
    *
    * The offset advances only AFTER a successful publish, which is what makes this at-least-once
-   * rather than at-most-once — a crash in that window republishes, and the broker collapses the
-   * duplicate on the idempotency key.
+   * rather than at-most-once — a crash in that window republishes. The duplicate REACHES consumers:
+   * the idempotency key is best-effort and broker dedup is off by default (§5). That is the
+   * contract this publisher offers, not a gap in it.
    */
   def hermesProjection[E](
       name: String,

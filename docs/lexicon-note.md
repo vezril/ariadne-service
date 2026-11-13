@@ -39,9 +39,24 @@ either ships. Flagging it, not proposing a fix.
 ## 2. What Ariadne publishes
 
 Three topics, self-provisioned at startup, published from an event-sourced outbox projection over
-the journal (offsets commit after a successful publish, so at-least-once; the deterministic
-`{persistenceId}:{seqNr}` rides as the broker's `idempotency_key`, so a republish collapses at the
-source rather than making every consumer responsible for detecting duplicates).
+the journal. Offsets commit after a successful publish, so **at-least-once**.
+
+> **Corrected 2026-11-13 by the HermesMQ session.** An earlier version of this note said the
+> deterministic `{persistenceId}:{seqNr}` rode as the broker's `idempotency_key` "so a republish
+> collapses at the source rather than making every consumer responsible for detecting duplicates."
+> **That was wrong as deployed.** `HERMESMQ_DEDUP_WINDOW` defaults to `0s` — dedup off — and with
+> it off the key is accepted and silently ignored. Even configured, it is a bounded window, so an
+> outbox replaying from an old offset is outside it anyway.
+>
+> **Consumers must dedup.** HermesMQ specifies `ackId` as a pure function of
+> `(subscription, message)`, stable across redelivery, nack and replay; a consumer that records
+> processed `ackId`s — ideally in the same transaction as its side effect — processes once. The
+> key is still sent because it covers retry-within-seconds and costs nothing, but it is not a
+> guarantee and nothing should be designed as though it were.
+>
+> **Demeter: create the subscription with `startFrom: "earliest"`** (REST only, as of
+> 2026-11-13), or a consumer created after this publisher starts silently misses everything
+> already published.
 
 | Topic | Event | Required consumer |
 |---|---|---|
