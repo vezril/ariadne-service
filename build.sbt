@@ -111,6 +111,28 @@ lazy val server = (project in file("server"))
     // Server only. Ariadne SERVES this surface and never calls itself, so a generated client
     // would be dead code that still has to compile and drag down coverage.
     pekkoGrpcGeneratedSources := Seq(PekkoGrpc.Server),
+    // Generated protobuf code is EXCLUDED from coverage, and the reason is that including it
+    // makes the number lie in both directions. Adding the proto dropped server statement
+    // coverage from 77.81% to 35.44% and branch from 66.38% to 17.66% — not because anything
+    // became less tested, but because several thousand generated statements (message builders,
+    // serializers, the descriptor) arrived at once. A metric that moves that far on a change
+    // that tested nothing less cannot be read for regressions, which is the only thing it is
+    // for. The hand-written mapping in me.cference.ariadne.grpc is NOT excluded: that is
+    // where a scope can get flattened or a confidence defaulted, and it is covered.
+    //
+    // Passed as a COMPILER FLAG rather than through `coverageExcludedPackages` /
+    // `coverageExcludedFiles`. Those are the obvious settings and they are silently inert
+    // here: on Scala 3 instrumentation is done by the compiler, and sbt-scoverage 2.0.12 does
+    // not forward them to scalac's own `-coverage-exclude-*` options. Setting them looked like
+    // it worked — `show` echoed the patterns back — while 4581 of 8462 instrumented statements
+    // still came from generated sources. Verified by counting statements in scoverage.xml, not
+    // by trusting the setting.
+    //
+    // Only added when coverage is on: the flag is meaningless without `-coverage-out`.
+    Compile / scalacOptions ++= {
+      if ((ThisBuild / coverageEnabled).value) Seq("-coverage-exclude-files:.*pekko-grpc.*")
+      else Nil
+    },
     resolvers ++= lexiconToken
       .map(_ => "Lexicon GitHub Packages".at("https://maven.pkg.github.com/vezril/the-lexicon"))
       .toSeq,
