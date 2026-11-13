@@ -15,7 +15,9 @@ import me.cference.ariadne.http.{
 import me.cference.ariadne.config.ScrapeConfig
 import me.cference.ariadne.hermes.{CatalogMessages, CatalogPublisher, HermesClient, HermesConfig}
 import me.cference.ariadne.domain.{CorrelationId, PriceScope, ProductId, PurchaseId, StoreId}
+import me.cference.ariadne.grpc.{AriadneCatalogService, CatalogReads, GrpcServer}
 import me.cference.ariadne.domain.price.{PriceCommand, PriceSource}
+import me.cference.ariadne.domain.product.ProductCommand
 import me.cference.ariadne.domain.purchase.PurchaseCommand
 import me.cference.ariadne.domain.store.StoreCommand
 import me.cference.ariadne.domain.resolution.{ResolutionCommand, ResolutionId}
@@ -34,6 +36,7 @@ import me.cference.ariadne.ingest.http.{
 }
 import me.cference.ariadne.persistence.{
   PriceStreamEntity,
+  ProductEntity,
   PurchaseEntity,
   ResolutionCaseEntity,
   SchemaMigration,
@@ -151,6 +154,41 @@ object Main:
     val resolution = new ResolutionService(new Resolver(repo), system)
 
     startScraping(cfg.scrape, resolution)
+
+    // The gRPC surface (§4) — Demeter and demeter-insight. Off unless configured on; see
+    // GrpcConfig for why that default is a decision rather than caution. Reads go to the
+    // projections, the two writes through `decide`, exactly as the REST surface does.
+    val productDecide: (ProductId, ProductCommand) => Future[Either[String, Unit]] =
+      (id, cmd) =>
+        Sharding
+          .product(system, id)
+          .askWithStatus[Done](ProductEntity.Execute(cmd, _))
+          .map(_ => Right(()))
+          .recover { case e: org.apache.pekko.pattern.StatusReply.ErrorMessage =>
+            Left(e.getMessage)
+          }
+
+    GrpcServer
+      .bind(
+        new AriadneCatalogService(
+          CatalogReads.fromRepository(repo),
+          resolution.resolveAndReview,
+          productDecide,
+          purchaseDecide
+        ),
+        cfg.grpc
+      )
+      .foreach(_.onComplete {
+        case Success(b) =>
+          system.log.info("gRPC surface bound on {}", b.localAddress)
+          b.addToCoordinatedShutdown(hardTerminationDeadline = 10.seconds)
+          ()
+        // A taken port must stop the process rather than leave the service up and silently
+        // unreachable on half its surface.
+        case Failure(e) =>
+          system.log.error("gRPC bind failed; shutting down", e)
+          system.terminate()
+      })
 
     // Readiness flips UP once the server is bound; withdrawn first on shutdown.
     val readiness = new AtomicBoolean(false)

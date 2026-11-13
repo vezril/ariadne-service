@@ -16,3 +16,11 @@ addSbtPlugin("org.scoverage" % "sbt-scoverage" % "2.0.12")
 
 // Build-time version info exposed to the app (health endpoint reports version).
 addSbtPlugin("com.eed3si9n" % "sbt-buildinfo" % "0.12.0")
+
+// gRPC codegen for the synchronous read surface (DESIGN §4). The service proto lives in
+// this repo as a PROPOSAL (build order step 5: "stub the Lexicon contract locally while the
+// proposal is reviewed") — it is not the landed contract, and the Lexicon owns that.
+//
+// Distinct from the Hermes stubs, which arrive PRE-GENERATED in the lexicon-hermes-grpc jar
+// and run no codegen here. This plugin generates only Ariadne's own service.
+addSbtPlugin("org.apache.pekko" % "pekko-grpc-sbt-plugin" % "1.1.1")
