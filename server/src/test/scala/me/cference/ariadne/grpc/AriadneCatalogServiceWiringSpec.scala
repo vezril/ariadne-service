@@ -80,7 +80,7 @@ final class AriadneCatalogServiceWiringSpec extends AnyWordSpec with Matchers wi
         service(repo0).getProduct(pb.GetProductRequest(productId = "old")).futureValue
       res.product.map(_.productId) shouldBe Some("old")
       res.redirected shouldBe false
-      res.product.map(_.status) shouldBe Some(pb.ProductStatus.MERGED_INTO)
+      res.product.map(_.status) shouldBe Some(pb.ProductStatus.PRODUCT_STATUS_MERGED_INTO)
     }
 
     "follow it when asked, and SAY that it did" in {
