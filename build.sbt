@@ -143,6 +143,27 @@ lazy val server = (project in file("server"))
     // to hurt and is not worth doing to fix a flake.
     Test / parallelExecution := false,
 
+    // docker-java advertises Engine API 1.32 unless told otherwise, and a current Docker Engine
+    // rejects anything below 1.40 — which aborts every testcontainers suite here with "client
+    // version 1.32 is too old. Minimum supported API version is 1.40". The lever is docker-java's
+    // `api.version` SYSTEM PROPERTY; the DOCKER_API_VERSION environment variable is NOT read
+    // (measured in apollo-storage).
+    //
+    // `Test / javaOptions` only reaches a FORKED JVM — sbt ignores it otherwise — so forking is
+    // required for the property to apply, not a preference. Execution stays serial either way.
+    //
+    // The baseDirectory line is load-bearing with it: a forked test JVM starts in the SUBPROJECT
+    // directory, while an unforked one inherits sbt's cwd (the repo root). OpenApiDriftSpec reads
+    // `insomnia/ariadne.yaml` by relative path, so forking alone breaks it with a
+    // FileNotFoundException. Pointing baseDirectory at the build root preserves the working
+    // directory tests already had, which keeps this change behaviour-preserving.
+    //
+    // PREVENTIVE: this repo's CI passes today because the runner it happened to get served an
+    // older Engine. iris-service hit the real failure on ubuntu-latest, and this is what fixed it.
+    Test / fork := true,
+    Test / javaOptions += "-Dapi.version=1.43",
+    Test / baseDirectory := (ThisBuild / baseDirectory).value,
+
     // BuildInfo exposes the dynver version to the running app (health endpoint).
     buildInfoKeys := Seq[BuildInfoKey](name, version, scalaVersion, sbtVersion),
     buildInfoPackage := "me.cference.ariadne.build",
