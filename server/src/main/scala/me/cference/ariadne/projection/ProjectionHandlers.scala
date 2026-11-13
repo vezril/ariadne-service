@@ -141,7 +141,8 @@ object ProjectionHandlers {
               e.unitPrice.map(_.amount),
               e.observedAt,
               sourceName(e.source),
-              e.sizeConfidence.toDouble
+              e.sizeConfidence.toDouble,
+              e.priceConfidence.toDouble
             )
           )
         } yield ()

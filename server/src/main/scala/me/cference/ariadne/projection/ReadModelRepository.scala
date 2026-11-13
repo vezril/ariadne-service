@@ -221,12 +221,13 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
     exec(
       """INSERT INTO current_price
          (product_id, scope_key, scope_kind, store_id, chain_id, area, price_amount, price_currency,
-          unit_price, observed_at, source, size_confidence)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+          unit_price, observed_at, source, size_confidence, price_confidence)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
          ON CONFLICT (product_id, scope_key) DO UPDATE SET
            price_amount = EXCLUDED.price_amount, price_currency = EXCLUDED.price_currency,
            unit_price = EXCLUDED.unit_price, observed_at = EXCLUDED.observed_at,
-           source = EXCLUDED.source, size_confidence = EXCLUDED.size_confidence
+           source = EXCLUDED.source, size_confidence = EXCLUDED.size_confidence,
+           price_confidence = EXCLUDED.price_confidence
          WHERE current_price.observed_at <= EXCLUDED.observed_at""",
       c.productId,
       c.scopeKey,
@@ -239,7 +240,8 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
       c.unitPrice.map(_.bigDecimal).orNull,
       c.observedAt,
       c.source,
-      java.lang.Double.valueOf(c.sizeConfidence)
+      java.lang.Double.valueOf(c.sizeConfidence),
+      java.lang.Double.valueOf(c.priceConfidence)
     )
 
   /**
@@ -317,7 +319,7 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
   def currentPriceForStore(productId: String, storeId: String): Future[Option[ResolvedPrice]] =
     query(
       """SELECT cp.price_amount, cp.price_currency, cp.observed_at, cp.source, cp.scope_kind,
-                cp.size_confidence, cp.store_id, cp.chain_id, cp.area
+                cp.size_confidence, cp.store_id, cp.chain_id, cp.area, cp.price_confidence
          FROM current_price cp
          LEFT JOIN store_coverage sc ON sc.store_id = $2
          WHERE cp.product_id = $1
@@ -337,7 +339,8 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
           r.get(5, classOf[java.lang.Double]).doubleValue,
           Option(r.get(6, classOf[String])),
           Option(r.get(7, classOf[String])),
-          Option(r.get(8, classOf[String]))
+          Option(r.get(8, classOf[String])),
+          r.get(9, classOf[java.lang.Double]).doubleValue
         )
     )(productId, storeId).map(_.headOption)
 
@@ -606,6 +609,42 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
    * Tombstones are excluded: they forward, and offering one as a search result invites a human to
    * link something onto a product that no longer exists as a distinct thing.
    */
+  /**
+   * A page of the catalog, for gRPC `ListProducts`.
+   *
+   * KEYSET pagination on `id`, not OFFSET. An offset over a catalog that is being written while it
+   * is read skips or repeats rows — and this catalog is written continuously by the scrape
+   * resolver, so that is the normal case rather than a race. The id is already the primary key, so
+   * `id > $token ORDER BY id` is both correct and indexed.
+   *
+   * An empty `statuses` means every status. There is deliberately no implicit filter: a default
+   * that hid PROVISIONAL products would make the review queue invisible to anything paging the
+   * catalog, which is the opposite of what the queue is for.
+   */
+  def listProducts(
+      statuses: List[String],
+      category: Option[String],
+      afterId: Option[String],
+      limit: Int
+  ): Future[List[ProductRow]] =
+    query(
+      """SELECT id, name, brand, category, size_amount, size_unit, status, merged_into
+         FROM products
+         WHERE ($1::text[] IS NULL OR status = ANY($1::text[]))
+           AND ($2::text IS NULL OR category = $2)
+           AND ($3::text IS NULL OR id > $3)
+         ORDER BY id
+         LIMIT $4""",
+      // The SAME mapper getProduct uses. A second copy of the column-to-field mapping is a
+      // second place for it to drift, and the columns are identical by construction.
+      productRow
+    )(
+      if statuses.isEmpty then null else statuses.toArray,
+      category.orNull,
+      afterId.orNull,
+      java.lang.Integer.valueOf(limit)
+    )
+
   def searchProducts(term: String, limit: Int = 20): Future[List[ProductRow]] =
     query(
       """SELECT p.id, p.name, p.brand, p.category, p.size_amount, p.size_unit, p.status, p.merged_into
@@ -738,7 +777,8 @@ object ReadModelRepository {
       unitPrice: Option[BigDecimal],
       observedAt: Instant,
       source: String,
-      sizeConfidence: Double
+      sizeConfidence: Double,
+      priceConfidence: Double
   )
 
   final case class CaseRow(
@@ -801,7 +841,9 @@ object ReadModelRepository {
       sizeConfidence: Double,
       storeId: Option[String],
       chainId: Option[String],
-      area: Option[String]
+      area: Option[String],
+      /** §2.3's other half, now that `current_price` carries it. */
+      priceConfidence: Double
   ) {
     def isExact: Boolean = scopeKind == "exact"
   }
