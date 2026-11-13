@@ -137,8 +137,9 @@ final class CatalogMessagesSpec extends AnyWordSpec with Matchers {
     }
 
     "publish a merge as a re-point on the SAME topic" in {
-      // §5: a consumer holding a product id learns to follow it. Whether this overloads
-      // the topic is §10.1, open with the Lexicon and deliberately not decided here.
+      // §10.1, DECIDED 2026-11-13: merges get their OWN topic. The overload made a
+      // registrations-only consumer decode every merge and discard it, forever, to save
+      // one topic — Dionysus wants registrations and not merges, Demeter the reverse.
       val out = CatalogMessages
         .product(
           topics,
@@ -148,11 +149,30 @@ final class CatalogMessagesSpec extends AnyWordSpec with Matchers {
           ProductEvent.ProductMerged(ProductId("p-new"), cid)
         )
         .get
-      out.topic shouldBe "product.registered"
+      out.topic shouldBe "product.merged"
       val p = payloadOf(out)
       p.fields("productId") shouldBe JsString("p-old")
       p.fields("status") shouldBe JsString("PRODUCT_STATUS_MERGED_INTO")
       p.fields("mergedInto") shouldBe JsString("p-new")
+    }
+
+    "keep a registration OFF the merge topic, so the split actually separates them" in {
+      // The point of the split is that a subscriber to one never sees the other. Asserted
+      // in both directions, because routing that is right for merges and wrong for
+      // registrations would still look right from the merge test alone.
+      val e = ProductEvent.ProductRegistered(
+        ProductId("p-1"),
+        "Lactantia Butter",
+        None,
+        None,
+        None,
+        None,
+        Origin.Scrape("flipp", None),
+        ProductStatus.Provisional,
+        cid
+      )
+      CatalogMessages.product(topics, "product|p-1", 1L, "", e).get.topic shouldBe
+        "product.registered"
     }
 
     "stay SILENT on internal bookkeeping" in {
