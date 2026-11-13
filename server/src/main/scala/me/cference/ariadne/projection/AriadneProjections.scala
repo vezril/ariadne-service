@@ -270,6 +270,12 @@ object AriadneProjections {
     // id than the journal recorded.
     val publishers = hermes.toList.flatMap { case (client, topics) =>
       List(
+        // ONE projection feeding TWO topics, since §10.1 split merges onto product.merged.
+        // That is deliberate, not an oversight to tidy later: both events come from the same
+        // ProductEntity journal stream, so they share an offset by nature. Splitting this
+        // into a projection per topic would give the same stream two independent offsets and
+        // let a registration be published while the merge that followed it had not been —
+        // out-of-order facts about one product, for no gain.
         ProjectionDef(
           "hermes-product",
           r =>

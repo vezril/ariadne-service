@@ -621,18 +621,29 @@ a missing opinion:**
 
 | RPC | Why not yet |
 |---|---|
-| `ListProducts` | No paged/filtered product query on the read model |
-| `ListPurchases` | No projection writes the `purchases`/`purchase_lines` tables — see below |
-| — | `GetCurrentPrice` carries `size_confidence` but NOT `price_confidence`: `current_price` does not store it (only `price_history` does), and a defaulted `0.0` would read as "no confidence" rather than "not known". The proto reserves the field number for a projection that has it. |
+| `ListProducts` | **CLOSED 2026-11-13** — keyset-paginated on the product id, filterable by status and category. Keyset rather than offset because the scrape resolver writes this catalog continuously, so an offset page skips or repeats rows as a matter of course. No implicit status filter: a default that hid PROVISIONAL products would make the review queue invisible to anything paging the catalog |
+| `GetCurrentPrice.price_confidence` | **CLOSED 2026-11-13** — the fix was the column, as the note said it would be. `current_price` now carries it, so both halves of §2.3 ride the current price as well as the history |
+| `ListPurchases` | **Still deferred, now deliberately** — see the purchases note below |
 
 **Found while building this: `price_history` was write-only.** The projection appended to it and
 nothing ever selected from it, so the table demeter-insight is supposed to re-point at during the
 Demeter migration had no read path at all. `GetPriceHistory` is that read path.
 
-**Also found: the DDL declares `purchases` and `purchase_lines`, and nothing writes them.** §3
-gives the Purchase aggregate an offset-only projection and no read model, so the schema and §3
-disagree. Worth settling deliberately — either the tables go, or a projection fills them and
-`ListPurchases` follows.
+**The `purchases` / `purchase_lines` disagreement — SETTLED 2026-11-13: keep the tables, leave
+them empty, document why.**
+
+The DDL declared a read model that §3 does not give this aggregate, so the two contradicted each
+other and anyone finding the tables empty would reasonably conclude a projection was broken.
+
+Kept rather than dropped, because they anticipate a consumer that is coming: budgeting (Plutus)
+will consume `purchase.recorded` over Hermes as its own service, and the schema is a considered
+design that re-deriving later is wasted work. Not filled now, because nothing in the catalog
+queries purchases — building the projection today is building for a consumer that does not exist,
+and `ListPurchases` stays deferred for the same reason.
+
+The resolution is therefore a COMMENT, not code: the DDL now says the tables are deliberately
+empty and why, so the next person to find them does not go looking for the bug. A disagreement
+between a schema and a design doc is only a problem while it is unexplained.
 
 The consequence to keep in view: this surface now has **two consumers**, so the OpenAPI document is
 a published contract rather than an affordance Ariadne can change freely. That is what the drift
@@ -651,7 +662,8 @@ Prometheus `/metrics` with Hera scrape annotations round out the HTTP server.
 
 | Topic | Domain event | Payload (Lexicon schema, PROPOSAL) | Subscribers |
 |---|---|---|---|
-| `product.registered` | `ProductRegistered` (and `ProductMerged` tombstones — see below) | product id, name, brand, size, gtin?, status, origin, `correlationId` | **Demeter** (optional: refresh watchable-product cache) · **Dionysus** (optional: new-product awareness for ingredient linking); both may ignore it in v1 |
+| `product.registered` | `ProductRegistered` | product id, name, brand, size, gtin?, status, origin, `correlationId` | **Demeter** (optional: refresh watchable-product cache) · **Dionysus** (optional: new-product awareness for ingredient linking); both may ignore it in v1 |
+| `product.merged` | `ProductMerged` | loser product id, `merged_into`, status, `correlationId` | **Demeter** (optional: re-point a watch off a merged id) · Dionysus may ignore it. Separate from `product.registered` as of §10.1's decision — see below |
 | `product.price.observed` | `PriceObserved` | product id, **scope (`exact{store_id}` \| `area{chain_id, area}` — §2.3.1)**, price, unit price, promo?, **price_confidence, size_confidence** (§2.3 — size ambiguity must reach Demeter's match confidence), observed_at, source, `correlationId` | **Demeter** (REQUIRED — the deal-evaluation policy: *whenever PriceObserved on a watched product then evaluate*). **Scope is required for correct alerting:** an area price speaks for every franchise of that chain in the region, so treating it as one store's price would under-count coverage, and treating it as N store prices would fabricate N facts |
 | `purchase.recorded` | `PurchaseRecorded` | purchase id, store id, purchased_at, lines[], total, source, `correlationId` | none in v1 · **future budgeting (Plutus)** · Dionysus MAY subscribe later for pantry restock |
 
@@ -706,9 +718,22 @@ Three corrections to what this section said before it was built, each found by b
      `codex.messages.v1`, matching the Lexicon's existing `lexicon-hermes-grpc` / `lexicon-grpc`
      split so a consumer pulls only the surface it speaks.
 
-   Still open and NOT blocking: whether merges get a dedicated `product.merged` topic rather than
-   riding `product.registered` with `status = MERGED_INTO` (§10.1). The Lexicon session leans
-   dedicated, since the overload makes a registration-only consumer parse and discard. Our call.
+   **§10.1 DECIDED 2026-11-13 — merges get their own topic, `product.merged`.** Taken on the
+   Lexicon session's lean, which we agreed with. The question was who pays for the overload: a
+   consumer that only wants new products would have to decode every merge and discard it, forever,
+   to save us one topic. Dionysus wants registrations and has no interest in merges; Demeter wants
+   merges so it can re-point a watch and barely cares about registrations. One topic forced both
+   subscriptions to be the union of the two.
+
+   Taken NOW rather than later because it is a topic-set change, and the window in which no
+   consumer exists is the only time one is free — the same reasoning behind the enum prefixes and
+   the reserved third `PriceScope` variant. `ProductRegistered` reserves field 9, where
+   `merged_into` used to sit, rather than reusing the number: a consumer built against the older
+   shape would read field 9 as a merge target, and an unrelated string there is worse than nothing.
+
+   `ProductMerged` is deliberately not the full product shape. A merge says one thing; a consumer
+   needing the winner's attributes can `GetProduct` it, and repeating them would invite a consumer
+   to read a merge notice as a registration of the winner, which it is not.
 
 **Deduplication is the CONSUMER's. Corrected 2026-11-13 by the HermesMQ session; the previous
 claim here was wrong as deployed.** This section used to say the deterministic

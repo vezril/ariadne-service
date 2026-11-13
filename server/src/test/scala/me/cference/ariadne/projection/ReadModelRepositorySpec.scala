@@ -94,6 +94,7 @@ final class ReadModelRepositorySpec
       None,
       at,
       "Scrape",
+      1.0,
       1.0
     )
 

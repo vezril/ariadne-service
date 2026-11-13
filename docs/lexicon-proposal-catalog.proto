@@ -109,10 +109,11 @@ enum ProductOrigin {
 
 // ---------------------------------------------- topic: product.registered
 
-// Also carries merges: a ProductMerged publishes here with status = MERGED_INTO and
-// merged_into set, so a consumer holding an id learns to re-point. Whether that overloads
-// the topic, or wants a dedicated product.merged, is DESIGN §10.1 — open, and a question
-// for the Lexicon rather than a decision Ariadne should make alone.
+// Registrations ONLY. Merges moved to their own topic (below) — DESIGN §10.1, decided
+// 2026-11-13 on the Lexicon session's lean. The overload made a registrations-only consumer
+// decode every merge and discard it, forever, to save one topic: Dionysus wants
+// registrations and not merges, Demeter wants merges so it can re-point a watch. Those are
+// different subscriptions.
 message ProductRegistered {
   string product_id = 1;
   string name = 2;
@@ -122,7 +123,27 @@ message ProductRegistered {
   string gtin = 6;
   ProductStatus status = 7;
   ProductOrigin origin = 8;
-  string merged_into = 9;   // set only when status = MERGED_INTO
+  // Field 9 was `merged_into`, set when status = MERGED_INTO, back when this message carried
+  // merges too. Reserved rather than reused: a consumer built against the older shape reads
+  // field 9 as a merge target, and handing it an unrelated string would be worse than
+  // handing it nothing.
+  reserved 9;
+}
+
+// -------------------------------------------------- topic: product.merged
+
+// A product id that now forwards. The loser's id keeps resolving forever — Dionysus and
+// Demeter hold ids Ariadne does not control — so this is hygiene for a consumer that caches
+// or watches an id, not a deletion it must race to honour.
+//
+// Deliberately NOT the full product shape. A merge says one thing, and a consumer that needs
+// the winner's attributes can GetProduct it; repeating them here would invite a consumer to
+// treat a merge notice as a registration of the winner, which it is not.
+message ProductMerged {
+  string product_id = 1;    // the loser — the id a consumer may be holding
+  string merged_into = 2;   // the canonical id to re-point to
+  ProductStatus status = 3; // always PRODUCT_STATUS_MERGED_INTO; stated so the product's
+                            // actual state and the topic cannot be read as disagreeing
 }
 
 // ----------------------------------------- topic: product.price.observed

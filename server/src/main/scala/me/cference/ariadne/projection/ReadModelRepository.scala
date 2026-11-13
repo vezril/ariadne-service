@@ -221,12 +221,13 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
     exec(
       """INSERT INTO current_price
          (product_id, scope_key, scope_kind, store_id, chain_id, area, price_amount, price_currency,
-          unit_price, observed_at, source, size_confidence)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+          unit_price, observed_at, source, size_confidence, price_confidence)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
          ON CONFLICT (product_id, scope_key) DO UPDATE SET
            price_amount = EXCLUDED.price_amount, price_currency = EXCLUDED.price_currency,
            unit_price = EXCLUDED.unit_price, observed_at = EXCLUDED.observed_at,
-           source = EXCLUDED.source, size_confidence = EXCLUDED.size_confidence
+           source = EXCLUDED.source, size_confidence = EXCLUDED.size_confidence,
+           price_confidence = EXCLUDED.price_confidence
          WHERE current_price.observed_at <= EXCLUDED.observed_at""",
       c.productId,
       c.scopeKey,
@@ -239,7 +240,8 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
       c.unitPrice.map(_.bigDecimal).orNull,
       c.observedAt,
       c.source,
-      java.lang.Double.valueOf(c.sizeConfidence)
+      java.lang.Double.valueOf(c.sizeConfidence),
+      java.lang.Double.valueOf(c.priceConfidence)
     )
 
   /**
@@ -317,7 +319,7 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
   def currentPriceForStore(productId: String, storeId: String): Future[Option[ResolvedPrice]] =
     query(
       """SELECT cp.price_amount, cp.price_currency, cp.observed_at, cp.source, cp.scope_kind,
-                cp.size_confidence, cp.store_id, cp.chain_id, cp.area
+                cp.size_confidence, cp.store_id, cp.chain_id, cp.area, cp.price_confidence
          FROM current_price cp
          LEFT JOIN store_coverage sc ON sc.store_id = $2
          WHERE cp.product_id = $1
@@ -337,9 +339,69 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
           r.get(5, classOf[java.lang.Double]).doubleValue,
           Option(r.get(6, classOf[String])),
           Option(r.get(7, classOf[String])),
-          Option(r.get(8, classOf[String]))
+          Option(r.get(8, classOf[String])),
+          r.get(9, classOf[java.lang.Double]).doubleValue
         )
     )(productId, storeId).map(_.headOption)
+
+  // --------------------------------------------------- demeter id mapping
+
+  /**
+   * Record what the resolver decided about one Demeter product key (migration-demeter.md step 2).
+   *
+   * UPSERT on `product_key` rather than insert, because an 18.7k-row backfill will be restarted and
+   * a re-run must converge rather than collide. The later decision wins: a key that was `ambiguous`
+   * and has since been resolved through the review queue should end up `matched`.
+   *
+   * Not a projection — see the DDL comment. It records a decision about an EXTERNAL corpus at a
+   * point in time, including the cases the resolver refused to decide, and the cutover needs the
+   * mapping the backfill actually used rather than one re-derived later against a moved catalog.
+   */
+  def upsertDemeterIdMap(
+      productKey: String,
+      productId: Option[String],
+      outcome: String,
+      confidence: Option[Double],
+      matchMethod: Option[String],
+      resolutionCaseId: Option[String],
+      sourceName: String,
+      resolvedAt: Instant
+  ): Future[Unit] =
+    exec(
+      """INSERT INTO demeter_id_map
+         (product_key, product_id, outcome, confidence, match_method, resolution_case_id,
+          source_name, resolved_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         ON CONFLICT (product_key) DO UPDATE SET
+           product_id = EXCLUDED.product_id,
+           outcome = EXCLUDED.outcome,
+           confidence = EXCLUDED.confidence,
+           match_method = EXCLUDED.match_method,
+           resolution_case_id = EXCLUDED.resolution_case_id,
+           source_name = EXCLUDED.source_name,
+           resolved_at = EXCLUDED.resolved_at""",
+      productKey,
+      productId.orNull,
+      outcome,
+      confidence.map(java.lang.Double.valueOf).orNull,
+      matchMethod.orNull,
+      resolutionCaseId.orNull,
+      sourceName,
+      resolvedAt
+    )
+
+  /** The mapping, for the cutover and for verifying a run. */
+  def demeterIdMapCounts(): Future[List[(String, Long)]] =
+    query(
+      """SELECT outcome, COUNT(*) FROM demeter_id_map GROUP BY outcome ORDER BY outcome""",
+      r => (r.get(0, classOf[String]), r.get(1, classOf[java.lang.Long]).longValue)
+    )()
+
+  def demeterProductId(productKey: String): Future[Option[String]] =
+    query(
+      """SELECT product_id FROM demeter_id_map WHERE product_key = $1""",
+      r => Option(r.get(0, classOf[String]))
+    )(productKey).map(_.headOption.flatten)
 
   // ----------------------------------------------------------- match index
 
@@ -547,6 +609,42 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
    * Tombstones are excluded: they forward, and offering one as a search result invites a human to
    * link something onto a product that no longer exists as a distinct thing.
    */
+  /**
+   * A page of the catalog, for gRPC `ListProducts`.
+   *
+   * KEYSET pagination on `id`, not OFFSET. An offset over a catalog that is being written while it
+   * is read skips or repeats rows — and this catalog is written continuously by the scrape
+   * resolver, so that is the normal case rather than a race. The id is already the primary key, so
+   * `id > $token ORDER BY id` is both correct and indexed.
+   *
+   * An empty `statuses` means every status. There is deliberately no implicit filter: a default
+   * that hid PROVISIONAL products would make the review queue invisible to anything paging the
+   * catalog, which is the opposite of what the queue is for.
+   */
+  def listProducts(
+      statuses: List[String],
+      category: Option[String],
+      afterId: Option[String],
+      limit: Int
+  ): Future[List[ProductRow]] =
+    query(
+      """SELECT id, name, brand, category, size_amount, size_unit, status, merged_into
+         FROM products
+         WHERE ($1::text[] IS NULL OR status = ANY($1::text[]))
+           AND ($2::text IS NULL OR category = $2)
+           AND ($3::text IS NULL OR id > $3)
+         ORDER BY id
+         LIMIT $4""",
+      // The SAME mapper getProduct uses. A second copy of the column-to-field mapping is a
+      // second place for it to drift, and the columns are identical by construction.
+      productRow
+    )(
+      if statuses.isEmpty then null else statuses.toArray,
+      category.orNull,
+      afterId.orNull,
+      java.lang.Integer.valueOf(limit)
+    )
+
   def searchProducts(term: String, limit: Int = 20): Future[List[ProductRow]] =
     query(
       """SELECT p.id, p.name, p.brand, p.category, p.size_amount, p.size_unit, p.status, p.merged_into
@@ -679,7 +777,8 @@ object ReadModelRepository {
       unitPrice: Option[BigDecimal],
       observedAt: Instant,
       source: String,
-      sizeConfidence: Double
+      sizeConfidence: Double,
+      priceConfidence: Double
   )
 
   final case class CaseRow(
@@ -742,7 +841,9 @@ object ReadModelRepository {
       sizeConfidence: Double,
       storeId: Option[String],
       chainId: Option[String],
-      area: Option[String]
+      area: Option[String],
+      /** §2.3's other half, now that `current_price` carries it. */
+      priceConfidence: Double
   ) {
     def isExact: Boolean = scopeKind == "exact"
   }

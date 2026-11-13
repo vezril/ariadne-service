@@ -31,13 +31,14 @@ object CatalogMessages extends DefaultJsonProtocol {
       correlationId: String
   )
 
-  /** The three topics (§5). Names are config so a rename is not a redeploy. */
+  /** The four topics (§5). Names are config so a rename is not a redeploy. */
   final case class Topics(
       productRegistered: String = "product.registered",
+      productMerged: String = "product.merged",
       priceObserved: String = "product.price.observed",
       purchaseRecorded: String = "purchase.recorded"
   ) {
-    def all: List[String] = List(productRegistered, priceObserved, purchaseRecorded)
+    def all: List[String] = List(productRegistered, productMerged, priceObserved, purchaseRecorded)
   }
 
   /**
@@ -56,9 +57,18 @@ object CatalogMessages extends DefaultJsonProtocol {
    * bookkeeping no consumer has asked for, and publishing everything the journal holds would make
    * the topic a change-data-capture feed rather than a contract.
    *
-   * `ProductMerged` publishes ON `product.registered` as a `status=merged_into` message — a
-   * consumer holding an id learns to re-point (§5). Whether that overloads the topic is §10.1, open
-   * with the Lexicon, and deliberately not decided here.
+   * `ProductMerged` gets its OWN topic, `product.merged` — §10.1, DECIDED 2026-11-13 on the Lexicon
+   * session's lean, which we agreed with.
+   *
+   * It used to ride `product.registered` as a `status=merged_into` message. The argument against
+   * that overload is who pays for it: a consumer that only wants new products would have to decode
+   * every merge and discard it, forever, to save us one topic. Dionysus wants registrations and has
+   * no interest in merges; Demeter wants merges so it can re-point a watch and barely cares about
+   * registrations. Those are different subscriptions, and one topic forced both to be the union.
+   *
+   * Changed now because it is a topic-set change, and the window in which no consumer exists is the
+   * only time that is free — the same reasoning that moved the enum prefixes and reserved the third
+   * `PriceScope` variant.
    */
   def product(
       topics: Topics,
@@ -97,12 +107,17 @@ object CatalogMessages extends DefaultJsonProtocol {
       case e: ProductEvent.ProductMerged =>
         Some(
           out(
-            topics.productRegistered,
+            topics.productMerged,
             persistenceId,
             seqNr,
             correlationId,
             Map("event" -> "ProductMerged", "productId" -> id),
             JsObject(
+              // `status` stays on the payload even though the topic now carries the same
+              // information. It is the product's actual state, and a consumer that reads a
+              // merge message and then re-reads the product should not find the two
+              // disagreeing. The topic says what happened; the field says what the product
+              // IS.
               "productId" -> JsString(id),
               "status" -> JsString("PRODUCT_STATUS_MERGED_INTO"),
               "mergedInto" -> JsString(e.into.value)

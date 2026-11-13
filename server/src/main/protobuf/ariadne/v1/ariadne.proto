@@ -24,6 +24,7 @@ package ariadne.v1;
 service AriadneCatalog {
   // --- Identity -------------------------------------------------------------
   rpc GetProduct (GetProductRequest) returns (GetProductResponse);
+  rpc ListProducts (ListProductsRequest) returns (ListProductsResponse);
   rpc SearchProducts (SearchProductsRequest) returns (SearchProductsResponse);
   rpc ResolveProduct (ResolveProductRequest) returns (ResolveProductResponse);
 
@@ -35,13 +36,15 @@ service AriadneCatalog {
   rpc RegisterProduct (RegisterProductRequest) returns (RegisterProductResponse);
   rpc RecordPurchase (RecordPurchaseRequest) returns (RecordPurchaseResponse);
 
-  // DEFERRED, deliberately, so their absence is a stated gap rather than an oversight:
+  // DEFERRED, deliberately, so the absence is a stated gap rather than an oversight:
   //
-  //   rpc ListProducts  — needs a paged/filtered product query the read model does not have.
-  //   rpc ListPurchases — needs a `purchases` read model, which §3 does not give this aggregate
-  //                       at all (it has an offset-only projection). Adding one is a design
-  //                       change, not an implementation gap, because nothing in the catalog
-  //                       queries purchases — budgeting will, over Hermes, as its own service.
+  //   rpc ListPurchases — the `purchases` / `purchase_lines` tables exist in the DDL and NOTHING
+  //                       writes them: §3 gives the Purchase aggregate an offset-only projection
+  //                       and no read model. The tables are kept rather than dropped because they
+  //                       anticipate budgeting (Plutus), which will consume `purchase.recorded`
+  //                       over Hermes as its own service. Building the projection now would be
+  //                       building for a consumer that does not exist; the gap is deliberate and
+  //                       the empty tables are documented as such in the DDL.
 }
 
 // Money is a DECIMAL STRING everywhere, never a float or a double. `4.99` has no exact binary
@@ -138,6 +141,28 @@ message GetProductResponse {
   string requested_product_id = 4;
 }
 
+// Paged, and the page token is an OPAQUE product id rather than an offset. An offset over a
+// catalog that is being written while it is read skips or repeats rows; keyset pagination on the
+// id does neither, and the id is already the primary key.
+message ListProductsRequest {
+  // Empty means every status. A caller wanting only usable products asks for ACTIVE — there is
+  // no implicit filter, because a default that hides PROVISIONAL products would make the review
+  // queue invisible to anything paging the catalog.
+  repeated ProductStatus statuses = 1;
+  string category = 2; // empty means any
+  int32 limit = 3; // defaults to 100; clamped
+  string page_token = 4; // the `next_page_token` from the previous response; empty to start
+  string correlation_id = 5;
+}
+
+message ListProductsResponse {
+  repeated Product products = 1;
+  // Empty when this is the last page. A caller must not infer "last page" from a short page:
+  // a filtered query can return fewer rows than the limit and still have more to give.
+  string next_page_token = 2;
+  string correlation_id = 3;
+}
+
 message SearchProductsRequest {
   string query = 1;
   int32 limit = 2; // defaults to 20; clamped
@@ -214,13 +239,10 @@ message GetCurrentPriceResponse {
   // split confidence and this one, so omitting it would let downstream judgment read too high.
   double size_confidence = 6;
   string correlation_id = 7;
-  // NOTE: there is deliberately no `price_confidence` here, and the gap is real rather than an
-  // oversight. The `current_price` read model does not carry it — only `price_history` does — and
-  // a proto3 double defaults to 0.0, which a consumer would read as "no confidence at all"
-  // instead of "not known". GetPriceHistory carries both. If a caller needs price confidence on
-  // the current price, the fix is a column on the projection, not a default here.
-  // Field 8 is left free for exactly that.
-  reserved 8;
+  // Added 2026-11-13 — the fix was the column, as the earlier note here said it would be.
+  // `current_price` now carries price_confidence, so both halves of §2.3 ride the current price
+  // as well as the history. Field 8 was reserved for exactly this.
+  double price_confidence = 8;
 }
 
 message GetPriceHistoryRequest {

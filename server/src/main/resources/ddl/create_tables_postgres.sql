@@ -247,12 +247,40 @@ CREATE TABLE IF NOT EXISTS current_price (
   observed_at     TIMESTAMPTZ NOT NULL,
   source          TEXT NOT NULL,
   size_confidence DOUBLE PRECISION NOT NULL,
+  -- Added 2026-11-13. It was absent, and its absence was load-bearing in the wrong
+  -- direction: gRPC GetCurrentPrice could not report price confidence at all, and a
+  -- proto3 double defaults to 0.0 — which a consumer reads as "no confidence" rather
+  -- than "not known". §2.3 says BOTH confidences ride every price fact; price_history
+  -- already carried both, and this is the projection catching up to the event.
+  --
+  -- NOT NULL with a default, so applying this to an existing database does not have to
+  -- backfill before the column is usable. 1.0 is the honest default for the rows that
+  -- predate it: every source that writes here (scrape, purchase, manual) states a real
+  -- confidence, and the projection overwrites on the next observation anyway.
+  price_confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
   PRIMARY KEY (product_id, scope_key)
 );
 
 -- ---------------------------------------------------------------------------
 -- purchase-history
 -- ---------------------------------------------------------------------------
+-- DELIBERATELY EMPTY, and that is the whole note: NOTHING WRITES THESE TABLES.
+--
+-- Settled 2026-11-13 after the gRPC build surfaced the disagreement. DESIGN §3 gives the
+-- Purchase aggregate an offset-only projection (the §2.4 price-append process manager)
+-- and no read model, while this DDL declares a read model for it — so the schema and §3
+-- contradicted each other, and anyone finding these tables empty would reasonably
+-- conclude a projection was broken.
+--
+-- Kept rather than dropped, because they anticipate a consumer that is coming: budgeting
+-- (Plutus) will consume `purchase.recorded` over Hermes as its own service. The schema is
+-- a considered design and re-deriving it later is wasted work.
+--
+-- NOT filled now, because nothing in the catalog queries purchases. Building the
+-- projection today would be building for a consumer that does not exist, and gRPC
+-- `ListPurchases` stays deferred for the same reason (see ariadne/v1/ariadne.proto).
+--
+-- So: empty is correct. If you are here because they are empty, this is why.
 CREATE TABLE IF NOT EXISTS purchases (
   id             TEXT PRIMARY KEY,
   store_id       TEXT NOT NULL,
@@ -401,3 +429,37 @@ CREATE TABLE IF NOT EXISTS flyer_fetch_ledger (
   fetched_at      TIMESTAMPTZ NOT NULL,
   raw_response_id BIGINT NOT NULL REFERENCES raw_response (id)
 );
+
+-- ---------------------------------------------------------------------------
+-- Demeter id mapping (migration-demeter.md step 2)
+-- ---------------------------------------------------------------------------
+-- The deliverable Demeter keeps for cutover: their product_key -> our ProductId.
+-- Step 4 rewrites every watch row through this table, so it outlives the backfill
+-- and is dropped only once nothing references a Demeter product key.
+--
+-- NOT a projection, unlike almost everything else here. It is not derivable from
+-- our journal — it records what the RESOLVER decided about an external corpus at a
+-- point in time, including the cases it refused to decide. Rebuilding it by
+-- re-running the resolver would produce a different table once the catalog has
+-- moved on, and the cutover needs the mapping the backfill actually used.
+CREATE TABLE IF NOT EXISTS demeter_id_map (
+  product_key    TEXT PRIMARY KEY,
+  -- NULL when the outcome is `ambiguous`: resolution never picks (§6.4), so an
+  -- ambiguous key has no id yet and a human decides it through the review queue.
+  -- A non-null id here is a commitment, which is why the column is nullable rather
+  -- than filled with a placeholder.
+  product_id     TEXT,
+  outcome        TEXT NOT NULL CHECK (outcome IN ('matched', 'registered', 'ambiguous')),
+  -- The resolver's own number for a match, kept so the cutover can audit WHY a key
+  -- maps where it does rather than trusting the mapping blindly.
+  confidence     DOUBLE PRECISION,
+  match_method   TEXT,
+  -- Set for `ambiguous`, so the queue entry is reachable from the mapping.
+  resolution_case_id TEXT,
+  source_name    TEXT NOT NULL,
+  resolved_at    TIMESTAMPTZ NOT NULL,
+  CHECK ((outcome = 'ambiguous' AND product_id IS NULL)
+      OR (outcome <> 'ambiguous' AND product_id IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS demeter_id_map_outcome ON demeter_id_map (outcome);
+CREATE INDEX IF NOT EXISTS demeter_id_map_product ON demeter_id_map (product_id);
