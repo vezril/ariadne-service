@@ -63,8 +63,18 @@ message PriceScope {
   oneof scope {
     ExactScope exact = 1;
     AreaScope area = 2;
+    // 3 reserved for a future variant — a national/banner-wide price would be neither
+    // exact nor area. Reserved now on the HermesMQ session's advice (2026-11-13) because
+    // if consumers match this union exhaustively, adding a variant later is a BREAKING
+    // change, and this is the only window in which no consumer exists. Inventing its
+    // fields today would be guessing; holding the number costs nothing.
   }
+  reserved 3;
 }
+
+// Consumers SHOULD treat an unrecognised scope variant as "a fact I cannot interpret" and skip
+// it, NOT fall back to exact or area — either fallback is one of the two silent errors this
+// tagged union exists to prevent (under-counting coverage, or fabricating N store facts).
 
 message ExactScope {
   string store_id = 1;

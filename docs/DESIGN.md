@@ -688,15 +688,43 @@ Three corrections to what this section said before it was built, each found by b
    protobuf JSON so adopting the contract changes the encoder and not the bytes. **A consumer
    building against these payloads today is building against a proposal**, and should know it.
 
-**Deduplication is the broker's, not every consumer's.** The deterministic
-`{persistenceId}:{seqNr}` rides as the publish `idempotency_key`, so an at-least-once republish
-collapses at the source instead of making every consumer in the constellation responsible for
-detecting duplicates.
+**Deduplication is the CONSUMER's. Corrected 2026-11-13 by the HermesMQ session; the previous
+claim here was wrong as deployed.** This section used to say the deterministic
+`{persistenceId}:{seqNr}` rode as the publish `idempotency_key` so a republish "collapsed at the
+source instead of making every consumer responsible for detecting duplicates." It does not:
+
+- `HERMESMQ_DEDUP_WINDOW` defaults to `0s` — dedup **off**. With it off the key is accepted and
+  **ignored**, every republish is a second delivery, and nothing errors. The failure mode is that
+  this would have been discovered by Demeter double-counting a price, not by us.
+- Even with a window configured it is a *window*: the seen-key set is pruned to roughly one
+  window of traffic. An outbox replaying from an old offset — restore, offset reset, operator
+  action — is far outside any sane window, so the one scenario a deterministic key exists for is
+  the one a window does not cover.
+
+The key is still sent: it costs nothing and genuinely covers retry-within-seconds. It is not a
+guarantee, and nothing downstream should be designed as though it were.
+
+**What consumers must do instead.** HermesMQ specifies `ackId` as a pure function of
+`(subscription, message)`, stable across redelivery after an ack-deadline lapse, a nack, and a
+projection replay. A consumer that records processed `ackId`s — ideally in the same transaction as
+its side effect — processes once. That is a tested requirement of the broker, not an
+implementation detail. It is also the only guarantee on offer: a broker cannot make a consumer's
+side effects atomic with its ack, so exactly-once is not available and HermesMQ now says so
+normatively.
+
+**Demeter specifically: create the subscription with `startFrom: "earliest"`.** Until 2026-11-13 a
+subscription only received messages published *after* it was created, so a consumer created after
+this publisher starts would silently miss everything already published — no error, just a gap.
+`POST /v1/subscriptions` now accepts `startFrom: "earliest"` to back-deliver retained history. Two
+caveats: "earliest" means earliest *still retained* (snapshot retention purges older journal
+events), and it is REST-only — `CreateSubscriptionRequest` comes from the pinned Lexicon artifact,
+so a gRPC-created subscription behaves as `now` until that contract changes.
 
 - **At-least-once, restart-safe:** offset commits after successful publish → crash between
-  publish and commit ⇒ re-publish, never a lost event. Consumers must be idempotent (they already
-  must be, constellation-wide); every message carries a deterministic `messageId`
-  (`{persistenceId}:{seqNr}`) so duplicates are detectable.
+  publish and commit ⇒ re-publish, never a lost event. Consumers must be idempotent, and that is
+  load-bearing rather than good manners — see above; every message carries a deterministic
+  `messageId` (`{persistenceId}:{seqNr}`) so a duplicate is *recognisable* by a consumer that
+  chooses to, which is not the same as deduplicated.
 - **Ordering:** per-entity order is guaranteed by the journal; that's the only ordering promised.
 - **Correlation:** the journaled `correlationId` rides the published message, so a
   scrape → resolve → observe → deal-alert chain is traceable end-to-end. The publisher reads the id
