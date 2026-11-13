@@ -651,7 +651,8 @@ Prometheus `/metrics` with Hera scrape annotations round out the HTTP server.
 
 | Topic | Domain event | Payload (Lexicon schema, PROPOSAL) | Subscribers |
 |---|---|---|---|
-| `product.registered` | `ProductRegistered` (and `ProductMerged` tombstones — see below) | product id, name, brand, size, gtin?, status, origin, `correlationId` | **Demeter** (optional: refresh watchable-product cache) · **Dionysus** (optional: new-product awareness for ingredient linking); both may ignore it in v1 |
+| `product.registered` | `ProductRegistered` | product id, name, brand, size, gtin?, status, origin, `correlationId` | **Demeter** (optional: refresh watchable-product cache) · **Dionysus** (optional: new-product awareness for ingredient linking); both may ignore it in v1 |
+| `product.merged` | `ProductMerged` | loser product id, `merged_into`, status, `correlationId` | **Demeter** (optional: re-point a watch off a merged id) · Dionysus may ignore it. Separate from `product.registered` as of §10.1's decision — see below |
 | `product.price.observed` | `PriceObserved` | product id, **scope (`exact{store_id}` \| `area{chain_id, area}` — §2.3.1)**, price, unit price, promo?, **price_confidence, size_confidence** (§2.3 — size ambiguity must reach Demeter's match confidence), observed_at, source, `correlationId` | **Demeter** (REQUIRED — the deal-evaluation policy: *whenever PriceObserved on a watched product then evaluate*). **Scope is required for correct alerting:** an area price speaks for every franchise of that chain in the region, so treating it as one store's price would under-count coverage, and treating it as N store prices would fabricate N facts |
 | `purchase.recorded` | `PurchaseRecorded` | purchase id, store id, purchased_at, lines[], total, source, `correlationId` | none in v1 · **future budgeting (Plutus)** · Dionysus MAY subscribe later for pantry restock |
 
@@ -706,9 +707,22 @@ Three corrections to what this section said before it was built, each found by b
      `codex.messages.v1`, matching the Lexicon's existing `lexicon-hermes-grpc` / `lexicon-grpc`
      split so a consumer pulls only the surface it speaks.
 
-   Still open and NOT blocking: whether merges get a dedicated `product.merged` topic rather than
-   riding `product.registered` with `status = MERGED_INTO` (§10.1). The Lexicon session leans
-   dedicated, since the overload makes a registration-only consumer parse and discard. Our call.
+   **§10.1 DECIDED 2026-11-13 — merges get their own topic, `product.merged`.** Taken on the
+   Lexicon session's lean, which we agreed with. The question was who pays for the overload: a
+   consumer that only wants new products would have to decode every merge and discard it, forever,
+   to save us one topic. Dionysus wants registrations and has no interest in merges; Demeter wants
+   merges so it can re-point a watch and barely cares about registrations. One topic forced both
+   subscriptions to be the union of the two.
+
+   Taken NOW rather than later because it is a topic-set change, and the window in which no
+   consumer exists is the only time one is free — the same reasoning behind the enum prefixes and
+   the reserved third `PriceScope` variant. `ProductRegistered` reserves field 9, where
+   `merged_into` used to sit, rather than reusing the number: a consumer built against the older
+   shape would read field 9 as a merge target, and an unrelated string there is worse than nothing.
+
+   `ProductMerged` is deliberately not the full product shape. A merge says one thing; a consumer
+   needing the winner's attributes can `GetProduct` it, and repeating them would invite a consumer
+   to read a merge notice as a registration of the winner, which it is not.
 
 **Deduplication is the CONSUMER's. Corrected 2026-11-13 by the HermesMQ session; the previous
 claim here was wrong as deployed.** This section used to say the deterministic

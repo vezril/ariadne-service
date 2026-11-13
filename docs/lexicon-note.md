@@ -61,7 +61,8 @@ the journal. Offsets commit after a successful publish, so **at-least-once**.
 | Topic | Event | Required consumer |
 |---|---|---|
 | `product.price.observed` | `PriceObserved` | **Demeter** — deal evaluation. This is the one with a hard dependency. |
-| `product.registered` | `ProductRegistered` (+ merges as `status=MERGED_INTO`) | Demeter / Dionysus, both optional in v1 |
+| `product.registered` | `ProductRegistered` | Demeter / Dionysus, both optional in v1 |
+| `product.merged` | `ProductMerged` | Demeter (re-point a watch); optional in v1 |
 | `purchase.recorded` | `PurchaseRecorded` | none in v1; future budgeting (Plutus) |
 
 The proposed shapes are in **`docs/lexicon-proposal-catalog.proto`** in this repo. Payloads are
@@ -107,11 +108,10 @@ prices for a deal would be comparing rounding artefacts.
 
 ## 3. One open question we are deliberately not deciding
 
-Merges publish on `product.registered` with `status = MERGED_INTO` and `merged_into` set, so a
-consumer holding a product id learns to re-point. Whether that overloads the topic's semantics, or
-wants a dedicated `product.merged`, is Ariadne's DESIGN §10.1 — **a question for the Lexicon rather
-than a call Ariadne should make alone**, and one with no urgency until a consumer actually needs
-merges.
+Merges publish on their own topic, `product.merged` (§10.1, decided 2026-11-13 on your lean — a
+registrations-only consumer should not have to decode and discard every merge to save one topic).
+The loser's id keeps resolving forever, so a merge notice is hygiene for a consumer that caches or
+watches an id, not a deletion to race.
 
 ## 4. What we need, and what we don't
 
