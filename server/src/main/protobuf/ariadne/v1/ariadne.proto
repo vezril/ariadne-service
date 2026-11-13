@@ -85,12 +85,16 @@ message AreaScope {
   string area = 2; // postal prefix, e.g. "H2X"
 }
 
+// Values carry the enum-name prefix because protobuf enum values are scoped to the PACKAGE, not
+// the enum — bare ACTIVE/PROVISIONAL would be package-level identifiers, and `buf lint` at
+// STANDARD rejects them (ENUM_VALUE_PREFIX). Matched to the Lexicon proposal so the two surfaces
+// name the same state the same way.
 enum ProductStatus {
   PRODUCT_STATUS_UNSPECIFIED = 0;
-  PROVISIONAL = 1; // auto-created by resolution; awaiting review
-  ACTIVE = 2;
-  MERGED_INTO = 3; // a forwarding tombstone; see Product.merged_into
-  DEPRECATED = 4;
+  PRODUCT_STATUS_PROVISIONAL = 1; // auto-created by resolution; awaiting review
+  PRODUCT_STATUS_ACTIVE = 2;
+  PRODUCT_STATUS_MERGED_INTO = 3; // a forwarding tombstone; see Product.merged_into
+  PRODUCT_STATUS_DEPRECATED = 4;
 }
 
 message Quantity {

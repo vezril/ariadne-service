@@ -104,7 +104,7 @@ object CatalogMessages extends DefaultJsonProtocol {
             Map("event" -> "ProductMerged", "productId" -> id),
             JsObject(
               "productId" -> JsString(id),
-              "status" -> JsString("MERGED_INTO"),
+              "status" -> JsString("PRODUCT_STATUS_MERGED_INTO"),
               "mergedInto" -> JsString(e.into.value)
             )
           )
@@ -258,22 +258,29 @@ object CatalogMessages extends DefaultJsonProtocol {
   }
 
   private def statusName(s: ProductStatus): String = s match {
-    case ProductStatus.Provisional => "PROVISIONAL"
-    case ProductStatus.Active => "ACTIVE"
-    case _: ProductStatus.MergedInto => "MERGED_INTO"
-    case ProductStatus.Deprecated => "DEPRECATED"
+    // The PROTO enum value names, verbatim, because canonical protobuf JSON serializes enums
+    // BY NAME and that canonical JSON is the Hermes wire format. These must track
+    // docs/lexicon-proposal-catalog.proto exactly or a consumer decoding against it sees an
+    // unknown enum value — which is a decode failure, not a default.
+    case ProductStatus.Provisional => "PRODUCT_STATUS_PROVISIONAL"
+    case ProductStatus.Active => "PRODUCT_STATUS_ACTIVE"
+    case _: ProductStatus.MergedInto => "PRODUCT_STATUS_MERGED_INTO"
+    case ProductStatus.Deprecated => "PRODUCT_STATUS_DEPRECATED"
   }
 
   private def originName(e: ProductEvent.ProductRegistered): String = e.origin match {
-    case me.cference.ariadne.domain.Origin.Manual => "MANUAL"
-    case _: me.cference.ariadne.domain.Origin.Scrape => "SCRAPE"
-    case _: me.cference.ariadne.domain.Origin.Migration => "MIGRATION"
+    case me.cference.ariadne.domain.Origin.Manual => "PRODUCT_ORIGIN_MANUAL"
+    case _: me.cference.ariadne.domain.Origin.Scrape => "PRODUCT_ORIGIN_SCRAPE"
+    case _: me.cference.ariadne.domain.Origin.Migration => "PRODUCT_ORIGIN_MIGRATION"
   }
 
   private def purchaseSourceName(s: PurchaseSource): String = s match {
-    case PurchaseSource.Manual => "MANUAL"
-    case _: PurchaseSource.Receipt => "RECEIPT"
-    case _: PurchaseSource.BankImport => "BANK_IMPORT"
+    // These were WRONG before the prefixes, not merely unprefixed: we emitted "MANUAL" while
+    // the proposal declared PURCHASE_MANUAL, so a consumer decoding canonical JSON against the
+    // contract would already have rejected the value. The prefix pass fixed a live mismatch.
+    case PurchaseSource.Manual => "PURCHASE_SOURCE_KIND_MANUAL"
+    case _: PurchaseSource.Receipt => "PURCHASE_SOURCE_KIND_RECEIPT"
+    case _: PurchaseSource.BankImport => "PURCHASE_SOURCE_KIND_BANK_IMPORT"
   }
 
   private def opt(v: Option[String]): JsValue = v.fold[JsValue](JsNull)(JsString.apply)

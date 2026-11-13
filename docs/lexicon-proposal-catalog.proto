@@ -20,7 +20,7 @@
 
 syntax = "proto3";
 
-package codex.messages.v1;
+package codex.catalog.v1;
 
 // ---------------------------------------------------------------- shared
 
@@ -83,19 +83,28 @@ message PurchaseSource { string purchase_id = 1; }
 message ManualSource {}
 message BackfillSource { string origin = 1; }
 
+// Values are prefixed with the enum name because protobuf enum values are scoped to the PACKAGE,
+// not to the enum — bare ACTIVE/MANUAL/SCRAPE would be package-level identifiers, and the
+// collision they invite is the kind that shows up as a build error in someone else's module. This
+// is also what `buf lint` at STANDARD requires (ENUM_VALUE_PREFIX).
+//
+// NOTE, because it is not free: canonical protobuf JSON serializes enums BY NAME, and Lexicon's
+// HermesMQ wire format IS canonical JSON. So these names are on the wire — "PRODUCT_STATUS_ACTIVE",
+// not "ACTIVE". Binary protobuf is unaffected. Done now because no consumer exists yet; after one
+// does, it is a coordinated migration across a live topic.
 enum ProductStatus {
   PRODUCT_STATUS_UNSPECIFIED = 0;
-  PROVISIONAL = 1;   // auto-created from a scraped listing; prices flow immediately
-  ACTIVE = 2;
-  MERGED_INTO = 3;   // this id forwards; see merged_into
-  DEPRECATED = 4;
+  PRODUCT_STATUS_PROVISIONAL = 1;   // auto-created from a scraped listing; prices flow immediately
+  PRODUCT_STATUS_ACTIVE = 2;
+  PRODUCT_STATUS_MERGED_INTO = 3;   // this id forwards; see merged_into
+  PRODUCT_STATUS_DEPRECATED = 4;
 }
 
 enum ProductOrigin {
   PRODUCT_ORIGIN_UNSPECIFIED = 0;
-  MANUAL = 1;
-  SCRAPE = 2;
-  MIGRATION = 3;
+  PRODUCT_ORIGIN_MANUAL = 1;
+  PRODUCT_ORIGIN_SCRAPE = 2;
+  PRODUCT_ORIGIN_MIGRATION = 3;
 }
 
 // ---------------------------------------------- topic: product.registered
@@ -156,9 +165,12 @@ message PurchaseLine {
   Money price_paid = 3;
   Money line_total = 4;
 }
+// PURCHASE_SOURCE_KIND_, not PURCHASE_SOURCE_ — the prefix is the full enum name, which is why
+// even the UNSPECIFIED value had to move. The old PURCHASE_MANUAL was a hand-rolled dodge of the
+// package-scope collision with ProductOrigin.MANUAL; the prefix rule removes the need to dodge.
 enum PurchaseSourceKind {
-  PURCHASE_SOURCE_UNSPECIFIED = 0;
-  PURCHASE_MANUAL = 1;
-  RECEIPT = 2;
-  BANK_IMPORT = 3;
+  PURCHASE_SOURCE_KIND_UNSPECIFIED = 0;
+  PURCHASE_SOURCE_KIND_MANUAL = 1;
+  PURCHASE_SOURCE_KIND_RECEIPT = 2;
+  PURCHASE_SOURCE_KIND_BANK_IMPORT = 3;
 }

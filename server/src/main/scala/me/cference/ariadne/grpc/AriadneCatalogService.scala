@@ -337,10 +337,10 @@ object AriadneCatalogService {
 
   private[grpc] def toStatus(s: String): pb.ProductStatus =
     s.toLowerCase match {
-      case "provisional" => pb.ProductStatus.PROVISIONAL
-      case "active" => pb.ProductStatus.ACTIVE
-      case "merged_into" | "mergedinto" => pb.ProductStatus.MERGED_INTO
-      case "deprecated" => pb.ProductStatus.DEPRECATED
+      case "provisional" => pb.ProductStatus.PRODUCT_STATUS_PROVISIONAL
+      case "active" => pb.ProductStatus.PRODUCT_STATUS_ACTIVE
+      case "merged_into" | "mergedinto" => pb.ProductStatus.PRODUCT_STATUS_MERGED_INTO
+      case "deprecated" => pb.ProductStatus.PRODUCT_STATUS_DEPRECATED
       // An unrecognised status maps to UNSPECIFIED rather than guessing ACTIVE. A new
       // status reaching an old consumer must not read as "fine to use".
       case _ => pb.ProductStatus.PRODUCT_STATUS_UNSPECIFIED

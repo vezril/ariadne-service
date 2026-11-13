@@ -128,8 +128,8 @@ final class CatalogMessagesSpec extends AnyWordSpec with Matchers {
       val out = CatalogMessages.product(topics, "product|p-1", 1L, "", e).get
       out.topic shouldBe "product.registered"
       val p = payloadOf(out)
-      p.fields("status") shouldBe JsString("PROVISIONAL")
-      p.fields("origin") shouldBe JsString("SCRAPE")
+      p.fields("status") shouldBe JsString("PRODUCT_STATUS_PROVISIONAL")
+      p.fields("origin") shouldBe JsString("PRODUCT_ORIGIN_SCRAPE")
       p.fields("size") shouldBe JsObject(
         "amount" -> JsString("454"),
         "unit" -> JsString("Gram")
@@ -151,7 +151,7 @@ final class CatalogMessagesSpec extends AnyWordSpec with Matchers {
       out.topic shouldBe "product.registered"
       val p = payloadOf(out)
       p.fields("productId") shouldBe JsString("p-old")
-      p.fields("status") shouldBe JsString("MERGED_INTO")
+      p.fields("status") shouldBe JsString("PRODUCT_STATUS_MERGED_INTO")
       p.fields("mergedInto") shouldBe JsString("p-new")
     }
 

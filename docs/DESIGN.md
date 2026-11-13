@@ -685,8 +685,30 @@ Three corrections to what this section said before it was built, each found by b
    `catalog.proto` reserves `PostCreated`/`TagsChanged`/`PostPurged` for a *different* Ariadne — an
    analytics consumer of Artemis's media catalog — which is a **name collision**, not this service.
    `docs/lexicon-proposal-catalog.proto` is the proposal; payloads are hand-encoded to its canonical
-   protobuf JSON so adopting the contract changes the encoder and not the bytes. **A consumer
-   building against these payloads today is building against a proposal**, and should know it.
+   protobuf JSON. **A consumer building against these payloads today is building against a
+   proposal**, and should know it.
+
+   **Name collision RESOLVED 2026-11-13 — Calvin ruled for this service.** `ariadne-service` keeps
+   the name Ariadne; the Lexicon's dead `codex/messages/v1/catalog.proto` reservation is deleted
+   (the-lexicon#9), and the Lexicon gained the rule that fell out of it: *SHALL NOT reserve a
+   namespace for a service that does not exist.*
+
+   Two changes came back with the ruling, both adopted:
+
+   - **Enum values carry their enum-name prefix** (`PRODUCT_STATUS_ACTIVE`, not `ACTIVE`) —
+     `buf lint` at `STANDARD` requires it, and protobuf enum values are package-scoped rather than
+     enum-scoped, so the bare names were package-level identifiers. Canonical JSON serializes
+     enums by name and that JSON is the Hermes wire format, so **this changed the wire for enum
+     fields**; binary protobuf is unaffected. Done while no consumer exists. It also corrected a
+     live mismatch: we emitted `"MANUAL"` for a purchase source against a proposal that declared
+     `PURCHASE_MANUAL`, which a canonical-JSON consumer would have rejected.
+   - **The contract moves to `codex.catalog.v1` in its own `lexicon-catalog` artifact**, not
+     `codex.messages.v1`, matching the Lexicon's existing `lexicon-hermes-grpc` / `lexicon-grpc`
+     split so a consumer pulls only the surface it speaks.
+
+   Still open and NOT blocking: whether merges get a dedicated `product.merged` topic rather than
+   riding `product.registered` with `status = MERGED_INTO` (§10.1). The Lexicon session leans
+   dedicated, since the overload makes a registration-only consumer parse and discard. Our call.
 
 **Deduplication is the CONSUMER's. Corrected 2026-11-13 by the HermesMQ session; the previous
 claim here was wrong as deployed.** This section used to say the deterministic
