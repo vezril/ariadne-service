@@ -341,6 +341,65 @@ final class ReadModelRepository(cf: ConnectionFactory)(using ec: ExecutionContex
         )
     )(productId, storeId).map(_.headOption)
 
+  // --------------------------------------------------- demeter id mapping
+
+  /**
+   * Record what the resolver decided about one Demeter product key (migration-demeter.md step 2).
+   *
+   * UPSERT on `product_key` rather than insert, because an 18.7k-row backfill will be restarted and
+   * a re-run must converge rather than collide. The later decision wins: a key that was `ambiguous`
+   * and has since been resolved through the review queue should end up `matched`.
+   *
+   * Not a projection — see the DDL comment. It records a decision about an EXTERNAL corpus at a
+   * point in time, including the cases the resolver refused to decide, and the cutover needs the
+   * mapping the backfill actually used rather than one re-derived later against a moved catalog.
+   */
+  def upsertDemeterIdMap(
+      productKey: String,
+      productId: Option[String],
+      outcome: String,
+      confidence: Option[Double],
+      matchMethod: Option[String],
+      resolutionCaseId: Option[String],
+      sourceName: String,
+      resolvedAt: Instant
+  ): Future[Unit] =
+    exec(
+      """INSERT INTO demeter_id_map
+         (product_key, product_id, outcome, confidence, match_method, resolution_case_id,
+          source_name, resolved_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         ON CONFLICT (product_key) DO UPDATE SET
+           product_id = EXCLUDED.product_id,
+           outcome = EXCLUDED.outcome,
+           confidence = EXCLUDED.confidence,
+           match_method = EXCLUDED.match_method,
+           resolution_case_id = EXCLUDED.resolution_case_id,
+           source_name = EXCLUDED.source_name,
+           resolved_at = EXCLUDED.resolved_at""",
+      productKey,
+      productId.orNull,
+      outcome,
+      confidence.map(java.lang.Double.valueOf).orNull,
+      matchMethod.orNull,
+      resolutionCaseId.orNull,
+      sourceName,
+      resolvedAt
+    )
+
+  /** The mapping, for the cutover and for verifying a run. */
+  def demeterIdMapCounts(): Future[List[(String, Long)]] =
+    query(
+      """SELECT outcome, COUNT(*) FROM demeter_id_map GROUP BY outcome ORDER BY outcome""",
+      r => (r.get(0, classOf[String]), r.get(1, classOf[java.lang.Long]).longValue)
+    )()
+
+  def demeterProductId(productKey: String): Future[Option[String]] =
+    query(
+      """SELECT product_id FROM demeter_id_map WHERE product_key = $1""",
+      r => Option(r.get(0, classOf[String]))
+    )(productKey).map(_.headOption.flatten)
+
   // ----------------------------------------------------------- match index
 
   def upsertMatchIndex(

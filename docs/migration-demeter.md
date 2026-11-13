@@ -188,6 +188,38 @@ HermesMQ v1.13.0 tracing makes scrape→observation→alert one traceable thread
    still evaluates off its own pipeline. This is the step that catches porting bugs while both
    truths exist.
 
+**── BLOCKER ON STEP 2's OBSERVATION HALF (new, 2026-11-13) ──**
+
+**The export as specified cannot produce a price scope, and guessing one would fabricate
+coverage.** Found while building the backfill, not while reading the plan.
+
+§2.3.1 makes scope part of a price fact's identity: a flyer price is `Regional(chainId, area)`, and
+`area` is the flyer-coverage region. The export's 21 columns give us `merchant_id` — which maps to
+`chain_id` — and **no area, postal code or FSA at all**.
+
+`demeter-ingestion-port.md` explains why, and it is not an oversight in the export: Flipp's
+`decodeFlyer` builds every `Flyer` from `merchant_id` + the **queried `postal_code`**, and that
+postal code lives on the *request*, not on the observation. So the area was never a column on
+`price_observation`; it was an input to the fetch that produced it.
+
+That leaves exactly two honest routes, and we need you to pick one:
+
+1. **Add `postal_code` (or the FSA) to the export**, taken from the fetch that produced each row —
+   the `raw_response` join you already use for provenance should have it on the request URL.
+2. **Export the `raw_response` rows too**, and we recover the area from each request URL on our
+   side. More data to move, but no change to your export query.
+
+What we will NOT do is default it. An area stands for every franchise of a chain in a region, so a
+wrong or placeholder area attributes 21,680 historical prices to the wrong set of stores — and
+that is one of the two silent failure modes the tagged union exists to prevent. Backfilling under
+a guessed area would make the step-2 verification ("history counts + spot-check series match")
+pass while the corpus was wrong.
+
+**What is already built and waiting on this:** the export reader parses all 21 columns, including
+both confidences verbatim and the `\N` NULL sentinel, and the product half of step 2 is done —
+resolver, the `demeter_id_map` table, review-queue parking for ambiguous keys. Only the
+observation loader is blocked, and it is small once the area has an answer.
+
 **── PRE-STEP-4 GATES (all four green before any cutover) ──**
 
 | # | Gate | Owner | Status |

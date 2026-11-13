@@ -401,3 +401,37 @@ CREATE TABLE IF NOT EXISTS flyer_fetch_ledger (
   fetched_at      TIMESTAMPTZ NOT NULL,
   raw_response_id BIGINT NOT NULL REFERENCES raw_response (id)
 );
+
+-- ---------------------------------------------------------------------------
+-- Demeter id mapping (migration-demeter.md step 2)
+-- ---------------------------------------------------------------------------
+-- The deliverable Demeter keeps for cutover: their product_key -> our ProductId.
+-- Step 4 rewrites every watch row through this table, so it outlives the backfill
+-- and is dropped only once nothing references a Demeter product key.
+--
+-- NOT a projection, unlike almost everything else here. It is not derivable from
+-- our journal — it records what the RESOLVER decided about an external corpus at a
+-- point in time, including the cases it refused to decide. Rebuilding it by
+-- re-running the resolver would produce a different table once the catalog has
+-- moved on, and the cutover needs the mapping the backfill actually used.
+CREATE TABLE IF NOT EXISTS demeter_id_map (
+  product_key    TEXT PRIMARY KEY,
+  -- NULL when the outcome is `ambiguous`: resolution never picks (§6.4), so an
+  -- ambiguous key has no id yet and a human decides it through the review queue.
+  -- A non-null id here is a commitment, which is why the column is nullable rather
+  -- than filled with a placeholder.
+  product_id     TEXT,
+  outcome        TEXT NOT NULL CHECK (outcome IN ('matched', 'registered', 'ambiguous')),
+  -- The resolver's own number for a match, kept so the cutover can audit WHY a key
+  -- maps where it does rather than trusting the mapping blindly.
+  confidence     DOUBLE PRECISION,
+  match_method   TEXT,
+  -- Set for `ambiguous`, so the queue entry is reachable from the mapping.
+  resolution_case_id TEXT,
+  source_name    TEXT NOT NULL,
+  resolved_at    TIMESTAMPTZ NOT NULL,
+  CHECK ((outcome = 'ambiguous' AND product_id IS NULL)
+      OR (outcome <> 'ambiguous' AND product_id IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS demeter_id_map_outcome ON demeter_id_map (outcome);
+CREATE INDEX IF NOT EXISTS demeter_id_map_product ON demeter_id_map (product_id);
