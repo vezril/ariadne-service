@@ -65,8 +65,27 @@ the journal. Offsets commit after a successful publish, so **at-least-once**.
 | `purchase.recorded` | `PurchaseRecorded` | none in v1; future budgeting (Plutus) |
 
 The proposed shapes are in **`docs/lexicon-proposal-catalog.proto`** in this repo. Payloads are
-currently hand-encoded to that proto's canonical protobuf JSON, so adopting the contract swaps the
-encoder without changing a byte on the wire.
+currently hand-encoded to that proto's canonical protobuf JSON.
+
+> **Updated 2026-11-13.** This used to claim adopting the contract "swaps the encoder without
+> changing a byte on the wire." That is no longer true, and the reason is worth keeping: the
+> Lexicon session found 11 `ENUM_VALUE_PREFIX` violations in the proposal (`buf lint` at
+> `STANDARD`, which the module sits at). Protobuf enum values are scoped to the **package**, not
+> the enum, so bare `ACTIVE`/`MANUAL`/`SCRAPE` were package-level identifiers — we were already
+> hand-dodging that with `ProductOrigin.MANUAL` vs `PurchaseSourceKind.PURCHASE_MANUAL`.
+>
+> Canonical JSON serializes enums **by name**, and that canonical JSON *is* the Hermes wire
+> format, so the fix changes the wire for enum fields: `"ACTIVE"` becomes
+> `"PRODUCT_STATUS_ACTIVE"`. Binary protobuf is unaffected. Applied now because no consumer
+> exists; after one does it is a coordinated migration across a live topic.
+>
+> It also fixed a live mismatch rather than only a lint warning: we emitted `"MANUAL"` for a
+> purchase source while the proposal declared `PURCHASE_MANUAL`, so a consumer decoding canonical
+> JSON against the contract would already have rejected the value.
+>
+> The package also moves to **`codex.catalog.v1`** in its own `lexicon-catalog` artifact, rather
+> than sharing `codex.messages.v1` with Artemis's media pipeline — the Lexicon's own established
+> split, so Demeter does not pull media-processing shapes to read a price.
 
 ### Three shape decisions worth arguing about
 

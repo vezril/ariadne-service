@@ -102,9 +102,13 @@ final class AriadneCatalogServiceSpec extends AnyWordSpec with Matchers {
   "a product" should {
 
     "map a known status, and refuse to guess an unknown one" in {
-      toProduct(row(status = "active")).status shouldBe pb.ProductStatus.ACTIVE
-      toProduct(row(status = "provisional")).status shouldBe pb.ProductStatus.PROVISIONAL
-      toProduct(row(status = "merged_into")).status shouldBe pb.ProductStatus.MERGED_INTO
+      toProduct(row(status = "active")).status shouldBe pb.ProductStatus.PRODUCT_STATUS_ACTIVE
+      toProduct(
+        row(status = "provisional")
+      ).status shouldBe pb.ProductStatus.PRODUCT_STATUS_PROVISIONAL
+      toProduct(
+        row(status = "merged_into")
+      ).status shouldBe pb.ProductStatus.PRODUCT_STATUS_MERGED_INTO
       // A status a new version introduced must not read as "fine to use" on an old consumer.
       toProduct(row(status = "something-new")).status shouldBe
         pb.ProductStatus.PRODUCT_STATUS_UNSPECIFIED
